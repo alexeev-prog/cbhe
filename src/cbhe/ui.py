@@ -1,7 +1,7 @@
 import curses
 from typing import Any, Optional
 
-from .colors import ascii_color, hex_color
+from .colors import ascii_color, field_color, hex_color
 from .constants import (
     KEYBINDS,
     PAIR_ADDR,
@@ -39,7 +39,7 @@ def draw_header(win: Any, hf: HexFile, top_row: int, editing: bool) -> None:
     mode = "EDIT" if editing else "VIEW"
     title = (
         f"  hexview [{mode}] │  {hf.path}{dirty_mark} │  "
-        f"{hf.size:,} B  │  w={hf.width}  │  {pct}%"
+        f"{hf.size:,} B  │  w={hf.width}  │  fmt={hf.format_name}  │  {pct}%"
     )
 
     pair = PAIR_HEADER_EDIT if editing else PAIR_HEADER
@@ -74,6 +74,7 @@ def _draw_hex_part(
     row: int,
     cursor_col: Optional[int],
     dirty_offsets: set[int],
+    hf: HexFile,
 ) -> int:
     for gi in range(0, width, 4):
         if gi > 0:
@@ -93,7 +94,11 @@ def _draw_hex_part(
                 elif offset in dirty_offsets:
                     attr = curses.color_pair(PAIR_DIRTY)
                 else:
-                    attr = hex_color(b)
+                    field_def = hf.get_field_at(offset)
+                    if field_def is not None:
+                        attr = field_color(field_def.ftype.name)
+                    else:
+                        attr = hex_color(b)
 
                 x = _addstr(win, y, x, f"{b:02x}", attr)
             else:
@@ -111,6 +116,7 @@ def _draw_ascii_part(
     row: int,
     cursor_col: Optional[int],
     dirty_offsets: set[int],
+    hf: HexFile,
 ) -> None:
     _, w = win.getmaxyx()
 
@@ -127,7 +133,11 @@ def _draw_ascii_part(
         elif offset in dirty_offsets:
             attr = curses.color_pair(PAIR_DIRTY)
         else:
-            attr = ascii_color(b)
+            field_def = hf.get_field_at(offset)
+            if field_def is not None:
+                attr = field_color(field_def.ftype.name)
+            else:
+                attr = ascii_color(b)
 
         x = _addstr(win, y, x, ch, attr)
 
@@ -140,15 +150,16 @@ def draw_hex_row(
     width: int,
     cursor_col: Optional[int],
     dirty_offsets: set[int],
+    hf: HexFile,
 ) -> None:
     h, w = win.getmaxyx()
     if y >= h - 1:
         return
 
     x = _addstr(win, y, 0, f"{row * width:08x}  ", curses.color_pair(PAIR_ADDR))
-    x = _draw_hex_part(win, y, x, data, width, row, cursor_col, dirty_offsets)
+    x = _draw_hex_part(win, y, x, data, width, row, cursor_col, dirty_offsets, hf)
     x = _addstr(win, y, x, "  │  ", curses.color_pair(PAIR_SEP))
-    _draw_ascii_part(win, y, x, data, width, row, cursor_col, dirty_offsets)
+    _draw_ascii_part(win, y, x, data, width, row, cursor_col, dirty_offsets, hf)
 
     try:
         win.clrtoeol()
@@ -177,7 +188,7 @@ def draw_rows(
                 pass
         else:
             cur_col = cursor[1] if cursor and cursor[0] == row else None
-            draw_hex_row(win, 1 + dy, row, data, hf.width, cur_col, dirty_offsets)
+            draw_hex_row(win, 1 + dy, row, data, hf.width, cur_col, dirty_offsets, hf)
 
 
 def draw_input_prompt(win: Any, prompt: str, max_len: int) -> str:

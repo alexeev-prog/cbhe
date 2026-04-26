@@ -75,7 +75,7 @@ def run(stdscr: Any, path: str) -> None:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: cbhe <filename>")
+        print("Usage: python hexview.py <filename>")
         sys.exit(1)
 
     path = sys.argv[1]

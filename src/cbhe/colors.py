@@ -13,6 +13,16 @@ from .constants import (
     PAIR_ASCII_BASE,
     PAIR_CURSOR,
     PAIR_DIRTY,
+    PAIR_FIELD_CHECKSUM,
+    PAIR_FIELD_DATA,
+    PAIR_FIELD_FLAGS,
+    PAIR_FIELD_HEADER,
+    PAIR_FIELD_MAGIC,
+    PAIR_FIELD_OFFSET,
+    PAIR_FIELD_RESERVED,
+    PAIR_FIELD_SIZE,
+    PAIR_FIELD_UNKNOWN,
+    PAIR_FIELD_VERSION,
     PAIR_HEADER,
     PAIR_HEADER_EDIT,
     PAIR_HEX_BASE,
@@ -75,6 +85,7 @@ def init_colors() -> None:
     curses.use_default_colors()
 
     _init_base_pairs()
+    _init_field_pairs()
     _init_hex_pairs()
     _init_ascii_pairs()
 
@@ -93,6 +104,24 @@ def _init_base_pairs() -> None:
     ]
 
     for pair_id, fg, bg in pairs:
+        curses.init_pair(pair_id, fg, bg)
+
+
+def _init_field_pairs() -> None:
+    field_colors = [
+        (PAIR_FIELD_MAGIC, curses.COLOR_YELLOW, -1),
+        (PAIR_FIELD_SIZE, curses.COLOR_GREEN, -1),
+        (PAIR_FIELD_OFFSET, curses.COLOR_CYAN, -1),
+        (PAIR_FIELD_FLAGS, curses.COLOR_MAGENTA, -1),
+        (PAIR_FIELD_CHECKSUM, curses.COLOR_RED, -1),
+        (PAIR_FIELD_VERSION, curses.COLOR_BLUE, -1),
+        (PAIR_FIELD_DATA, curses.COLOR_WHITE, -1),
+        (PAIR_FIELD_RESERVED, -1, curses.COLOR_WHITE),
+        (PAIR_FIELD_HEADER, curses.COLOR_BLACK, curses.COLOR_YELLOW),
+        (PAIR_FIELD_UNKNOWN, curses.COLOR_WHITE, -1),
+    ]
+
+    for pair_id, fg, bg in field_colors:
         curses.init_pair(pair_id, fg, bg)
 
 
@@ -133,3 +162,10 @@ def ascii_color(bval: int) -> int:
     if ASCII_PRINTABLE_START <= bval <= ASCII_PRINTABLE_END:
         return curses.color_pair(PAIR_ASCII_BASE + (bval - ASCII_PRINTABLE_START))
     return curses.color_pair(PAIR_HEX_BASE + bval)
+
+
+def field_color(field_type_name: str) -> int:
+    from .constants import FIELD_TYPE_COLORS
+
+    pair_id = FIELD_TYPE_COLORS.get(field_type_name, PAIR_FIELD_UNKNOWN)
+    return curses.color_pair(pair_id)

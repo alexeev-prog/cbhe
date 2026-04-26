@@ -2,6 +2,8 @@ import math
 import os
 from typing import Optional
 
+from .formats import FieldDef, FormatDef, detect_format, get_field_at
+
 
 class HexFile:
     CHUNK_BYTES = 65536
@@ -13,6 +15,16 @@ class HexFile:
         self.size = os.path.getsize(path)
         self._cache: dict[int, bytearray] = {}
         self._dirty: dict[int, int] = {}
+        self.file_format: Optional[FormatDef] = None
+        self._detect_format()
+
+    def _detect_format(self) -> None:
+        try:
+            with open(self.path, "rb") as fh:
+                header = fh.read(1024)
+            self.file_format = detect_format(header)
+        except (IOError, OSError):
+            self.file_format = None
 
     @property
     def total_rows(self) -> int:
@@ -81,6 +93,8 @@ class HexFile:
                 fh.write(bytes([val]))
 
         self._dirty.clear()
+        self.file_format = None
+        self._detect_format()
 
     def set_width(self, width: int) -> None:
         self.width = width
@@ -111,3 +125,14 @@ class HexFile:
                 offset += len(chunk)
 
         return None
+
+    def get_field_at(self, offset: int) -> Optional[FieldDef]:
+        if self.file_format is None:
+            return None
+        return get_field_at(offset, self.file_format)
+
+    @property
+    def format_name(self) -> str:
+        if self.file_format is None:
+            return "none"
+        return self.file_format.name
