@@ -5,18 +5,10 @@ import sys
 from typing import Any
 
 from .colors import init_colors
-from .handlers import (
-    handle_edit,
-    handle_normal,
-)
+from .handlers import handle_edit, handle_normal
 from .hexfile import HexFile
 from .state import EditorState
-from .ui import (
-    draw_header,
-    draw_input_prompt,
-    draw_keybinds,
-    draw_rows,
-)
+from .ui import draw_header, draw_input_prompt, draw_keybinds, draw_rows
 
 
 def run(stdscr: Any, path: str) -> None:
