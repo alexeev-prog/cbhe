@@ -3,7 +3,9 @@ from typing import Any, Optional
 
 from .colors import ascii_color, field_color, hex_color
 from .constants import (
-    KEYBINDS,
+    KEYBINDS_EDIT,
+    KEYBINDS_NORMAL,
+    KEYBINDS_READ,
     PAIR_ADDR,
     PAIR_CURSOR,
     PAIR_DIRTY,
@@ -12,8 +14,10 @@ from .constants import (
     PAIR_KEYBINDS,
     PAIR_KEYBINDS_EDIT,
     PAIR_SEP,
+    EditorMode,
 )
 from .hexfile import HexFile
+from .state import EditorState
 
 
 def _addstr(win: Any, y: int, x: int, text: str, attr: int = 0) -> int:
@@ -31,31 +35,43 @@ def _addstr(win: Any, y: int, x: int, text: str, attr: int = 0) -> int:
     return x + len(text)
 
 
-def draw_header(win: Any, hf: HexFile, top_row: int, editing: bool) -> None:
+def draw_header(win: Any, hf: HexFile, state: EditorState) -> None:
     _, w = win.getmaxyx()
-    pct = 100 * top_row // max(1, hf.total_rows - 1)
+    pct = 100 * state.top_row // max(1, hf.total_rows - 1)
     dirty_mark = " [*] " if hf.is_dirty else " "
 
-    mode = "EDIT" if editing else "VIEW"
+    mode_label = {
+        EditorMode.READ: "READ",
+        EditorMode.HEX: "HEX-NORM" if not state.editing else "HEX-EDIT",
+        EditorMode.ASCII: "ASCII-NORM" if not state.editing else "ASCII-EDIT",
+    }[state.mode]
+
     title = (
-        f"  hexview [{mode}] │  {hf.path}{dirty_mark} │  "
+        f"  cbhe [{mode_label}] │  {hf.path}{dirty_mark}│  "
         f"{hf.size:,} B  │  w={hf.width}  │  fmt={hf.format_name}  │  {pct}%"
     )
 
-    pair = PAIR_HEADER_EDIT if editing else PAIR_HEADER
+    pair = PAIR_HEADER_EDIT if state.editing else PAIR_HEADER
     _addstr(win, 0, 0, title.ljust(w - 1), curses.color_pair(pair))
 
 
-def draw_keybinds(win: Any, editing: bool) -> None:
+def draw_keybinds(win: Any, state: EditorState) -> None:
     h, w = win.getmaxyx()
     y = h - 1
     x = 0
 
-    pair = PAIR_KEYBINDS_EDIT if editing else PAIR_KEYBINDS
+    if state.mode == EditorMode.READ:
+        keybinds = KEYBINDS_READ
+    elif state.editing:
+        keybinds = KEYBINDS_EDIT
+    else:
+        keybinds = KEYBINDS_NORMAL
+
+    pair = PAIR_KEYBINDS_EDIT if state.editing else PAIR_KEYBINDS
     base = curses.color_pair(pair)
     bold = base | curses.A_BOLD
 
-    for key, label in KEYBINDS:
+    for key, label in keybinds:
         needed = len(key) + len(label) + 3
         if x + needed >= w:
             break
@@ -73,6 +89,8 @@ def _draw_hex_part(
     width: int,
     row: int,
     cursor_col: Optional[int],
+    hex_nibble: int,
+    editing: bool,
     dirty_offsets: set[int],
     hf: HexFile,
 ) -> int:
@@ -100,7 +118,16 @@ def _draw_hex_part(
                     else:
                         attr = hex_color(b)
 
-                x = _addstr(win, y, x, f"{b:02x}", attr)
+                hi = f"{b:02x}"
+                if idx == cursor_col and editing:
+                    hi_char = hi[hex_nibble]
+                    lo_char = hi[1 - hex_nibble]
+                    x = _addstr(
+                        win, y, x, hi_char, attr | curses.A_UNDERLINE | curses.A_BOLD
+                    )
+                    x = _addstr(win, y, x, lo_char, attr)
+                else:
+                    x = _addstr(win, y, x, hi, attr)
             else:
                 x = _addstr(win, y, x, "  ", curses.color_pair(PAIR_SEP))
 
@@ -147,19 +174,42 @@ def draw_hex_row(
     y: int,
     row: int,
     data: bytearray,
-    width: int,
-    cursor_col: Optional[int],
+    state: EditorState,
     dirty_offsets: set[int],
-    hf: HexFile,
 ) -> None:
     h, w = win.getmaxyx()
     if y >= h - 1:
         return
 
+    hf = state.hf
+    width = hf.width
+    cursor = state.cursor
+
+    cursor_col_hex: Optional[int] = None
+    cursor_col_ascii: Optional[int] = None
+
+    if cursor and cursor[0] == row:
+        if state.mode == EditorMode.HEX:
+            cursor_col_hex = cursor[1]
+        elif state.mode == EditorMode.ASCII:
+            cursor_col_ascii = cursor[1]
+
     x = _addstr(win, y, 0, f"{row * width:08x}  ", curses.color_pair(PAIR_ADDR))
-    x = _draw_hex_part(win, y, x, data, width, row, cursor_col, dirty_offsets, hf)
+    x = _draw_hex_part(
+        win,
+        y,
+        x,
+        data,
+        width,
+        row,
+        cursor_col_hex,
+        state.hex_nibble,
+        state.editing,
+        dirty_offsets,
+        hf,
+    )
     x = _addstr(win, y, x, "  │  ", curses.color_pair(PAIR_SEP))
-    _draw_ascii_part(win, y, x, data, width, row, cursor_col, dirty_offsets, hf)
+    _draw_ascii_part(win, y, x, data, width, row, cursor_col_ascii, dirty_offsets, hf)
 
     try:
         win.clrtoeol()
@@ -169,15 +219,14 @@ def draw_hex_row(
 
 def draw_rows(
     win: Any,
-    hf: HexFile,
-    top_row: int,
-    cursor: Optional[tuple[int, int]],
+    state: EditorState,
 ) -> None:
     h, _ = win.getmaxyx()
+    hf = state.hf
     dirty_offsets = hf.dirty_offsets
 
     for dy in range(h - 2):
-        row = top_row + dy
+        row = state.top_row + dy
         data = hf.get_row(row)
 
         if data is None:
@@ -187,8 +236,7 @@ def draw_rows(
             except curses.error:
                 pass
         else:
-            cur_col = cursor[1] if cursor and cursor[0] == row else None
-            draw_hex_row(win, 1 + dy, row, data, hf.width, cur_col, dirty_offsets, hf)
+            draw_hex_row(win, 1 + dy, row, data, state, dirty_offsets)
 
 
 def draw_input_prompt(win: Any, prompt: str, max_len: int) -> str:

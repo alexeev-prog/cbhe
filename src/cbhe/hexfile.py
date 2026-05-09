@@ -5,6 +5,28 @@ from typing import Optional
 from .formats import FieldDef, FormatDef, detect_format, get_field_at
 
 
+def _group_consecutive(offsets_vals: list[tuple[int, int]]) -> list[tuple[int, bytes]]:
+    if not offsets_vals:
+        return []
+
+    groups: list[tuple[int, bytes]] = []
+    sorted_pairs = sorted(offsets_vals, key=lambda p: p[0])
+
+    run_start, run_bytes = sorted_pairs[0]
+    run = bytearray([run_bytes])
+
+    for offset, val in sorted_pairs[1:]:
+        if offset == run_start + len(run):
+            run.append(val)
+        else:
+            groups.append((run_start, bytes(run)))
+            run_start = offset
+            run = bytearray([val])
+
+    groups.append((run_start, bytes(run)))
+    return groups
+
+
 class HexFile:
     CHUNK_BYTES = 65536
     CACHE_ROWS = 4096
@@ -83,14 +105,27 @@ class HexFile:
             if col < len(cache_data):
                 cache_data[col] = value
 
+    def read_byte(self, offset: int) -> int:
+        if offset in self._dirty:
+            return self._dirty[offset]
+
+        row = offset // self.width
+        col = offset % self.width
+        data = self.get_row(row)
+        if data is None or col >= len(data):
+            return 0
+        return data[col]
+
     def save(self) -> None:
         if not self._dirty:
             return
 
+        groups = _group_consecutive(list(self._dirty.items()))
+
         with open(self.path, "r+b") as fh:
-            for offset, val in sorted(self._dirty.items()):
+            for offset, block in groups:
                 fh.seek(offset)
-                fh.write(bytes([val]))
+                fh.write(block)
 
         self._dirty.clear()
         self.file_format = None
@@ -100,15 +135,17 @@ class HexFile:
         self.width = width
         self._cache.clear()
 
-    def find_ascii(self, query: bytes) -> Optional[int]:
+    def find_bytes(self, query: bytes, start: int = 0) -> Optional[int]:
         if not query:
             return None
 
         chunk_size = 1024 * 1024
-        offset = 0
+        overlap = len(query) - 1
+        offset = max(0, start - overlap)
         prev_tail = b""
 
         with open(self.path, "rb") as fh:
+            fh.seek(offset)
             while True:
                 chunk = fh.read(chunk_size)
                 if not chunk:
@@ -117,14 +154,32 @@ class HexFile:
                 search_data = prev_tail + chunk
                 idx = search_data.find(query)
                 if idx != -1:
-                    return offset + idx - len(prev_tail)
+                    found = offset + idx - len(prev_tail)
+                    if found >= start:
+                        return found
 
-                prev_tail = (
-                    chunk[-(len(query) - 1) :] if len(chunk) >= len(query) else chunk
-                )
+                prev_tail = chunk[-overlap:] if overlap else b""
                 offset += len(chunk)
 
         return None
+
+    def find_bytes_backward(self, query: bytes, start: int) -> Optional[int]:
+        if not query:
+            return None
+
+        with open(self.path, "rb") as fh:
+            search_end = min(start + len(query) - 1, self.size)
+            fh.seek(0)
+            data = fh.read(search_end)
+
+        idx = data.rfind(query, 0, start)
+        if idx != -1:
+            return idx
+
+        return None
+
+    def find_ascii(self, query: bytes, start: int = 0) -> Optional[int]:
+        return self.find_bytes(query, start)
 
     def get_field_at(self, offset: int) -> Optional[FieldDef]:
         if self.file_format is None:

@@ -72,10 +72,9 @@ def print_hex_result(result: HexDumpResult) -> None:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: cbhe <filename>")
+        print("Usage: python simple_print.py <filename>")
         sys.exit(1)
 
-    print("CBHE - Colored Bytes Hex Editor (C) alexeev-prog")
     result = load_hex_file_chunked(sys.argv[1])
     print_hex_result(result)
 

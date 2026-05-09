@@ -152,7 +152,7 @@ def print_hex_result(result: HexDumpResult) -> None:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: python script.py <filename>")
+        print("Usage: python simple_colored.py <filename>")
         sys.exit(1)
 
     result = load_hex_file_chunked(sys.argv[1])

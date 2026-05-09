@@ -1,3 +1,5 @@
+from enum import Enum, auto
+
 PAIR_ADDR = 1
 PAIR_SEP = 2
 PAIR_HEADER = 3
@@ -35,17 +37,46 @@ FIELD_TYPE_COLORS = {
 
 WIDTH_CYCLES = [8, 16, 32]
 
-KEYBINDS = [
+
+class EditorMode(Enum):
+    READ = auto()
+    HEX = auto()
+    ASCII = auto()
+
+
+KEYBINDS_READ = [
     ("↑↓", "scroll"),
     ("PgUp/Dn", "page"),
     ("Home/End", "first/last"),
     ("g", "goto"),
     ("w", "width"),
+    ("r", "read mode"),
+    ("h", "hex mode"),
+    ("a", "ascii mode"),
+    ("q", "quit"),
+]
+
+KEYBINDS_NORMAL = [
+    ("↑↓←→", "move"),
     ("e", "edit"),
     ("/", "search"),
+    ("n", "next match"),
+    ("N", "prev match"),
     ("^S", "save"),
-    ("Esc", "exit edit"),
-    ("q", "quit"),
+    ("u", "undo"),
+    ("^R", "redo"),
+    ("Esc/r", "read mode"),
+    ("h/a", "switch panel"),
+]
+
+KEYBINDS_EDIT = [
+    ("↑↓←→", "move"),
+    ("Esc", "normal"),
+    ("^S", "save"),
+    ("u", "undo"),
+    ("^R", "redo"),
+    ("Del", "del fwd"),
+    ("BS", "del back"),
 ]
 
 COLOR_SLOTS = 256
@@ -56,3 +87,5 @@ BYTE_MAX = 0xFF
 BYTE_MIN = 0x00
 DEFAULT_BYTE_RGB = (64, 64, 64)
 MAX_BYTE_RGB = (255, 255, 255)
+
+UNDO_LIMIT = 1000
