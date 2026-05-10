@@ -48,21 +48,30 @@ def gradient_color(byte_value: int) -> str:
     return f"\033[38;2;{r};{g};{b}m"
 
 
-def ascii_color(byte_value: int) -> str:
-    if 32 <= byte_value <= 126:
-        gray = 150 + int((byte_value - 32) / 94 * 105)
-        return f"\033[38;2;{gray};{gray};{gray}m"
-
-    dark_gray = 40 + int(byte_value % 64)
-    return f"\033[38;2;{dark_gray};{dark_gray};{dark_gray}m"
-
-
 def colorize_hex_digit(byte_value: int, hex_digit: str) -> str:
     return f"{gradient_color(byte_value)}{hex_digit}{COLOR_RESET}"
 
 
 def colorize_ascii_char(byte_value: int, char: str) -> str:
-    return f"{ascii_color(byte_value)}{char}{COLOR_RESET}"
+    if byte_value == 0x20:
+        return f"\033[38;5;240m{char}{COLOR_RESET}"
+
+    if 48 <= byte_value <= 57:
+        return f"\033[93m{char}{COLOR_RESET}"
+
+    if 65 <= byte_value <= 90:
+        return f"\033[38;5;82m{char}{COLOR_RESET}"
+
+    if 97 <= byte_value <= 122:
+        return f"\033[92m{char}{COLOR_RESET}"
+
+    if 33 <= byte_value <= 126:
+        return f"\033[38;5;228m{char}{COLOR_RESET}"
+
+    if 9 <= byte_value <= 13:
+        return f"\033[38;5;245m{char}{COLOR_RESET}"
+
+    return f"\033[90m{char}{COLOR_RESET}"
 
 
 def format_hex_group(chunk: bytes, start: int, end: int) -> str:

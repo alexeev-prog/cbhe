@@ -27,9 +27,15 @@ from .constants import (
     PAIR_HEADER_EDIT,
     PAIR_HEX_BASE,
     PAIR_HIGHLIGHT,
+    PAIR_INTERPRET_BORDER,
+    PAIR_INTERPRET_LABEL,
+    PAIR_INTERPRET_VALUE,
     PAIR_KEYBINDS,
     PAIR_KEYBINDS_EDIT,
+    PAIR_SEARCH_MATCH,
     PAIR_SEP,
+    PAIR_STATUS,
+    PAIR_STATUS_FIELD,
 )
 
 
@@ -88,6 +94,8 @@ def init_colors() -> None:
     _init_field_pairs()
     _init_hex_pairs()
     _init_ascii_pairs()
+    _init_extra_pairs()
+    _init_interpret_pairs()
 
 
 def _init_base_pairs() -> None:
@@ -152,6 +160,18 @@ def _init_ascii_pairs() -> None:
                 continue
 
         curses.init_pair(pair_id, curses.COLOR_WHITE, -1)
+
+
+def _init_extra_pairs() -> None:
+    curses.init_pair(PAIR_STATUS, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    curses.init_pair(PAIR_STATUS_FIELD, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    curses.init_pair(PAIR_SEARCH_MATCH, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+
+
+def _init_interpret_pairs() -> None:
+    curses.init_pair(PAIR_INTERPRET_LABEL, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    curses.init_pair(PAIR_INTERPRET_VALUE, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    curses.init_pair(PAIR_INTERPRET_BORDER, curses.COLOR_BLACK, curses.COLOR_BLACK)
 
 
 def hex_color(bval: int) -> int:

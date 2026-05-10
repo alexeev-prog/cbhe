@@ -23,8 +23,15 @@ class _UndoEntry:
 @dataclass
 class SearchState:
     query: bytes = b""
-    last_offset: int = 0
+    last_offset: int = -1
+    match_len: int = 0
     is_hex: bool = False
+
+
+@dataclass
+class StatusMessage:
+    text: str = ""
+    is_error: bool = False
 
 
 @dataclass
@@ -36,7 +43,9 @@ class EditorState:
     cur_row: int = 0
     cur_col: int = 0
     hex_nibble: int = 0
+    show_interpret: bool = False
     search: SearchState = field(default_factory=SearchState)
+    status: StatusMessage = field(default_factory=StatusMessage)
     _undo_stack: deque[_UndoEntry] = field(
         default_factory=lambda: deque(maxlen=UNDO_LIMIT), init=False, repr=False
     )
@@ -55,6 +64,13 @@ class EditorState:
     @property
     def in_ascii_panel(self) -> bool:
         return self.mode == EditorMode.ASCII
+
+    @property
+    def cursor_offset(self) -> int:
+        return self.cur_row * self.hf.width + self.cur_col
+
+    def toggle_interpret(self) -> None:
+        self.show_interpret = not self.show_interpret
 
     def clamp_top(self, visible: int) -> None:
         self.top_row = max(0, min(self.top_row, self.hf.total_rows - visible))
@@ -144,21 +160,29 @@ class EditorState:
 
     def undo(self) -> None:
         if not self._undo_stack:
+            self.status = StatusMessage("nothing to undo", is_error=True)
             return
         entry = self._undo_stack.pop()
         self.hf.write_byte(entry.row, entry.col, entry.old_val)
         self._redo_stack.append(entry)
         self.cur_row = entry.row
         self.cur_col = entry.col
+        self.status = StatusMessage(
+            f"undo → {entry.old_val:02x} at {entry.row * self.hf.width + entry.col:08x}"
+        )
 
     def redo(self) -> None:
         if not self._redo_stack:
+            self.status = StatusMessage("nothing to redo", is_error=True)
             return
         entry = self._redo_stack.pop()
         self.hf.write_byte(entry.row, entry.col, entry.new_val)
         self._undo_stack.append(entry)
         self.cur_row = entry.row
         self.cur_col = entry.col
+        self.status = StatusMessage(
+            f"redo → {entry.new_val:02x} at {entry.row * self.hf.width + entry.col:08x}"
+        )
 
     def sync_scroll(self, visible: int) -> None:
         if self.cur_row < self.top_row:
@@ -177,6 +201,19 @@ class EditorState:
             min(self.cur_row - visible // 2, self.hf.total_rows - visible),
         )
 
+    def _apply_search_result(
+        self, found: Optional[int], visible: int, wrapped_msg: str
+    ) -> bool:
+        if found is None:
+            self.status = StatusMessage(
+                f"not found: {self.search.query!r}", is_error=True
+            )
+            return False
+        self.search.last_offset = found
+        self.search.match_len = len(self.search.query)
+        self.jump_to_offset(found, visible)
+        return True
+
     def search_next(self, visible: int) -> bool:
         if not self.search.query:
             return False
@@ -184,11 +221,9 @@ class EditorState:
         found = self.hf.find_bytes(self.search.query, start)
         if found is None:
             found = self.hf.find_bytes(self.search.query, 0)
-        if found is not None:
-            self.search.last_offset = found
-            self.jump_to_offset(found, visible)
-            return True
-        return False
+            if found is not None:
+                self.status = StatusMessage("search wrapped to start")
+        return self._apply_search_result(found, visible, "search wrapped to start")
 
     def search_prev(self, visible: int) -> bool:
         if not self.search.query:
@@ -197,8 +232,6 @@ class EditorState:
         found = self.hf.find_bytes_backward(self.search.query, current)
         if found is None:
             found = self.hf.find_bytes_backward(self.search.query, self.hf.size)
-        if found is not None:
-            self.search.last_offset = found
-            self.jump_to_offset(found, visible)
-            return True
-        return False
+            if found is not None:
+                self.status = StatusMessage("search wrapped to end")
+        return self._apply_search_result(found, visible, "search wrapped to end")

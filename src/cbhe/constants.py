@@ -21,6 +21,12 @@ PAIR_FIELD_DATA = 372
 PAIR_FIELD_RESERVED = 373
 PAIR_FIELD_HEADER = 374
 PAIR_FIELD_UNKNOWN = 375
+PAIR_STATUS = 376
+PAIR_STATUS_FIELD = 377
+PAIR_SEARCH_MATCH = 378
+PAIR_INTERPRET_LABEL = 379
+PAIR_INTERPRET_VALUE = 380
+PAIR_INTERPRET_BORDER = 381
 
 FIELD_TYPE_COLORS = {
     "MAGIC": PAIR_FIELD_MAGIC,
@@ -37,6 +43,8 @@ FIELD_TYPE_COLORS = {
 
 WIDTH_CYCLES = [8, 16, 32]
 
+INTERPRET_PANEL_WIDTH = 28
+
 
 class EditorMode(Enum):
     READ = auto()
@@ -50,33 +58,32 @@ KEYBINDS_READ = [
     ("Home/End", "first/last"),
     ("g", "goto"),
     ("w", "width"),
-    ("r", "read mode"),
-    ("h", "hex mode"),
-    ("a", "ascii mode"),
+    ("h", "hex"),
+    ("a", "ascii"),
+    ("i", "interpret"),
+    ("?", "hex srch"),
     ("q", "quit"),
 ]
 
 KEYBINDS_NORMAL = [
     ("↑↓←→", "move"),
     ("e", "edit"),
-    ("/", "search"),
-    ("n", "next match"),
-    ("N", "prev match"),
+    ("/", "ascii srch"),
+    ("?", "hex srch"),
+    ("n/N", "next/prev"),
+    ("i", "interpret"),
     ("^S", "save"),
-    ("u", "undo"),
-    ("^R", "redo"),
-    ("Esc/r", "read mode"),
-    ("h/a", "switch panel"),
+    ("u/^R", "undo/redo"),
+    ("Esc/r", "read"),
+    ("h/a", "panel"),
 ]
 
 KEYBINDS_EDIT = [
     ("↑↓←→", "move"),
     ("Esc", "normal"),
     ("^S", "save"),
-    ("u", "undo"),
-    ("^R", "redo"),
-    ("Del", "del fwd"),
-    ("BS", "del back"),
+    ("u/^R", "undo/redo"),
+    ("Del/BS", "del"),
 ]
 
 COLOR_SLOTS = 256
@@ -89,3 +96,11 @@ DEFAULT_BYTE_RGB = (64, 64, 64)
 MAX_BYTE_RGB = (255, 255, 255)
 
 UNDO_LIMIT = 1000
+
+
+def human_size(n: int) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024  # type: ignore[assignment]
+    return f"{n:.1f} TiB"
