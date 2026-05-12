@@ -421,31 +421,1610 @@ def _init_field_pairs() -> None:
 # Архитектура проекта
 Ну что, время перейти к самому сладкому - самому коду и созданию hex-редактора! Писать мы будем на чистом Python 3.14 и встроенной библиотекой curses. Господам из Windows придется немного пострадать - curses не входит в стандартную поставку для windows, и вам придется установить `windows-curses`. Но даже так возможны нюансы работы - в первую очередь из-за цветов. Так что работоспособность на Windows не гарантируется, можете работать через WSL.
 
-Давайте разберем структуру:
+Проект простой, так что я не стал разбивать на множество слоев и абстракций, и обошелся в 10 файлов:
 
 ```
-src/
-└── cbhe
-    ├── __init__.py      # запуск, аргументы, главный цикл
-    ├── hexfile.py       # работа с файлом: чтение, кеш, запись, поиск
-    ├── state.py         # состояние редактора: курсор, режим, undo/redo
-    ├── handlers.py      # обработка клавиш для каждого режима
-    ├── ui.py            # отрисовка: заголовок, строки дампа, панели
-    ├── colors.py        # инициализация цветов и цветовые функции
-    ├── formats.py       # описание форматов и автоопределение
-    ├── interpret.py     # интерпретация байт: числа, float, UTF-8
-    └── constants.py     # константы, перечисления, раскладки клавиш
+src/cbhe/
+├── __init__.py     # Точка входа, главный цикл, аргументы командной строки
+├── constants.py    # Конфигурация: номера цветовых пар, раскладки клавиш, ширины дампа
+├── keys.py         # Коды клавиш (обёртка над curses.KEY_*)
+├── terminal.py     # Обёртка над curses: setup, read_key, screen_size
+├── hexfile.py      # Чтение, кеширование, запись, поиск по файлу
+├── state.py        # Состояние редактора: режим, курсор, undo/redo, поиск
+├── handlers.py     # Обработка клавиш для каждого режима
+├── ui.py           # Отрисовка: строки дампа, заголовок, статус, панель интерпретации
+├── colors.py       # Инициализация 350+ цветовых пар, функции выбора цвета байта
+├── formats.py      # Описания форматов, детектирование сигнатур, загрузка из JSON
+└── interpret.py    # Интерпретация байта как чисел и строк
 ```
 
-Я пытался соблюдать практики KISS, DRY и SRP из SOLID.
+Я старался следовать, как я считаю, фундаментальным принципам: DRY, KISS, и самое главное - SRP из SOLID, принцип единой ответственности. Модуль hexfile не знает про curses, модуль ui не читает клавиши. Это позволит сменить библиотеку отрисовки на другую, не переписывая несколько файлов, а логика данных и состояние останется нетронутыми.
 
-hexfile.py знает всё про файл на диске: как читать чанками, как кешировать строки, как хранить изменённые байты, как сохранять. Он ничего не знает про курсор, цвета или клавиши.
+Почему я выбрал curses? Все просто - предельная простота. Textual дает красивую разметку, но тащит за собой Rich, разного многого бойлерплейта для такого небольшого проекта. Curses нативно оперирует цветовыми парами, которых у нас 256 только на градиент. И главное — curses не требует установки ничего, кроме стандартной библиотеки Python.
 
-state.py держит текущее состояние: на какой мы строке, в каком режиме, редактируем ли, что в истории undo. Он вызывает методы HexFile, но не трогает ни curses, ни отрисовку.
+Кроме того, я учел, что терминал может не поддерживать изменение цветов, так что если поддержки нет - цветового оформления в виде градиента не будет.
 
-ui.py получает состояние и HexFile, и рисует всё на экране. Он не обрабатывает клавиши и не меняет данные.
+Этот же принцип применён к панели интерпретации: она рисуется только если хватает ширины терминала. Если окно слишком узкое — панель просто не показывается, не ломая вёрстку.
 
-handlers.py получает код клавиши и состояние, модифицирует состояние. Он не рисует и не читает файл.
+![Скриншот интерфейса](https://habrastorage.org/webt/1d/ac/03/1dac03b20d48ee9864aa55f7baeaa3cd.png)
 
-Такое разделение означает, что можно заменить curses на другой бекенд (например, Textual), переписав только ui.py и handlers.py. Или прикрутить графический интерфейс на Qt — hexfile.py и formats.py останутся без изменений.
+Давайте перейдем к тому как я планировал UI/UX редактора. Я решил немного вдохновиться режимами из VIM'а, переделав их под себя. Есть три режима:
 
+1. Стандартный READ (`r`). Чтение без редактирования, поиск и скроллинг.
+2. HEX (`h`) - режим hex-панели. Позволяет уже не только скроллить, но и двигать курсор по байтам. Кейбинд `e` входит в редактирование, можно менять байты по нибблам.
+3. ASCII (`a`) - курсор в ASCII-панели. По кейбинду `e` - также режим редактирования, ввод символов напрямую меняет и байты.
+
+При редактировании изменённые байты подсвечиваются красным фоном (dirty) до сохранения. Работает undo/redo: `u` отменяет последнее изменение, `Ctrl+R` — возвращает. История — 1000 записей, две раздельные стопки. Сохранение по `Ctrl+S` сбрасывает dirty-состояние и историю.
+
+Поиск есть двух видов: `/` — ASCII-поиск (поиск по строке), `?` — hex-поиск (вводишь `ff d8 ff` или `FFD8FF`). Найденные совпадения подсвечиваются жёлтым фоном. `n` — следующее совпадение, `N` — предыдущее. Поиск кольцевой: дойдя до конца файла, переходит в начало.
+
+Клавиша `i` включает панель интерпретации справа. Для байта под курсором показывает: int8/uint8, int16/32/64 в LE и BE, float32/64, битовое представление, UTF-8 из 4 и 8 байт. Панель автоматически скрывается, если не хватает ширины терминала.
+
+Клавиша `w` переключает ширину дампа: 8, 16 или 32 байта в строке. `g` — переход по адресу.
+
+Строка заголовка показывает: режим, имя файла, размер, ширину дампа, распознанный формат, процент просмотра. Строка статуса под дампом показывает offset в hex и dec, значение байта в hex/dec/char, имя и тип поля формата, если байт принадлежит известному полю. В правой части статусной строки — сообщения: результат поиска, undo/redo, ошибки.
+
+Точкой входа является файл `__init__`.py. Он разбирает аргументы командной строки, загружает форматы, инициализирует цветы, создает объекты. Цикл на каждой итерации отрисовывает весь фрейм, читает клавишу и передает ее. Простой синхронный цикл, обновляющий состояние целиком.
+
+Кстати, насчет аргументов командной строки, я их оформил ниже в виде таблицы:
+
+| Флаг | Описание |
+|---|---|
+| `-f`, `--formats` | JSON-файл с пользовательскими форматами (можно несколько) |
+| `-w`, `--width` | Начальная ширина дампа: 8, 16 или 32 (по умолчанию 16) |
+| `-m`, `--mode` | Начальный режим: read, hex или ascii (по умолчанию read) |
+| `--no-auto-detect` | Отключить автоопределение формата |
+| `--format-dir` | Загрузить все *.json из указанной директории как форматы |
+
+В первую очередь я создал их поддержку из-за того, что захотел поддерживать кастомные пользовательские форматы файлов для подсветки. Также по традиции использовал стандартный модуль argparse, хотя думал сначала установить click, но раз проект без внешних зависимостей, а логика не сложная, можно обойтись и стандартным argparse.
+
+## HexFile: работа с файлом
+Редактор не должен загружать сразу весь файл.
+
+Можно конечно обойтись следующей конструкцией:
+
+```python
+with open(filename, 'rb') as f:
+    data = f.read()
+
+# или
+
+with open('file.bin', 'rb') as f:
+    data = bytearray(f.read())
+```
+
+Но в случае TUI это плохо, так как могут возникнуть проблемы с рендерингом. Вместо прямого полного чтения стоит использовать технику ленивой загрузки чанками. HexFile как раз этим и занимается, он хранит LRU (Last Recent Usage) кеш строк, реализованный через OrderedDict:
+
+```python
+class _LRURowCache:
+    def __init__(self, capacity: int) -> None:
+        self._cap = capacity
+        self._store: OrderedDict[int, bytearray] = OrderedDict()
+
+    def get(self, key: int) -> Optional[bytearray]:
+        if key not in self._store:
+            return None
+        self._store.move_to_end(key)
+        return self._store[key]
+
+    def put(self, key: int, value: bytearray) -> None:
+        if key in self._store:
+            self._store.move_to_end(key)
+        self._store[key] = value
+        if len(self._store) > self._cap:
+            self._store.popitem(last=False)
+
+    def update(self, key: int, col: int, value: int) -> None:
+        row = self._store.get(key)
+        if row is not None and col < len(row):
+            row[col] = value
+
+    def clear(self) -> None:
+        self._store.clear()
+
+    def __contains__(self, key: int) -> bool:
+        return key in self._store
+```
+
+ > OrderedDict взят из-за того что он сохраняет порядок включения элементов. Да, с python 3.7 стандартный dict уже сохраняет порядок, но использование OrderedDict выражает намерение именно в упорядоченности, а также позволяет использовать метод `move_to_end`, что требует меньше кода чем стандартный dict.
+
+Когда кеш переполняется, самый старый элемент удаляется. Ёмкость — 8192 строки. При ширине дампа 16 байт это 128 КБ данных, что умещается даже в кеш процессора.
+
+Метод update позволяет модифицировать закешированную строку на месте, не вынимая её из кеша. Это нужно для dirty-механики: когда пользователь меняет байт, мы сразу обновляем и кеш, и словарь "грязных" смещений.
+
+Если запрошенной строки нет в кеше, у нас существует функция `_load_region`:
+
+```python
+def _load_region(self, anchor_row: int) -> None:
+    row_start = max(0, anchor_row - self.PREFETCH_ROWS // 4)
+    byte_start = row_start * self.width
+    byte_len = min(self.PREFETCH_ROWS * self.width, self.size - byte_start)
+
+    if byte_len <= 0:
+        return
+
+    raw = self._read_raw(byte_start, byte_len)
+
+    for i in range(0, len(raw), self.width):
+        r = row_start + i // self.width
+        self._cache.put(r, bytearray(raw[i : i + self.width]))
+```
+
+Эта функция читает с диска блок в 512 строк (prefetch) с якорем на четверть выше запрошенной строки. Так при скроллинге вперёд данные уже подгружены.
+
+Для файлов больше 64 МБ обычное чтение через open().read() создаёт лишнее копирование данных из буфера ядра в userspace. Здесь нам поможет mmap - сисколл, который позволяет отобразить содержимое файла или устройства в адресное пространство процесса.
+
+mmap отображает файл в виртуальную память процесса, и операционная система сама решает, какие страницы держать в физической памяти. Это даёт два преимущества: экономия памяти и нативный поиск через self._mmap.find() без ручного чанкования.
+
+```python
+    def _open_mmap(self) -> None:
+        if not self._use_mmap or self.size == 0:
+            return
+        try:
+            self._mmap_fh = open(self.path, "rb")  # type: ignore
+            self._mmap = mmap.mmap(self._mmap_fh.fileno(), 0, access=mmap.ACCESS_READ)  # type: ignore
+        except (OSError, ValueError):
+            self._mmap = None
+            if self._mmap_fh:
+                self._mmap_fh.close()
+                self._mmap_fh = None
+
+    def _close_mmap(self) -> None:
+        if self._mmap is not None:
+            try:
+                self._mmap.close()
+            except Exception:
+                pass
+            self._mmap = None
+        if self._mmap_fh is not None:
+            try:
+                self._mmap_fh.close()
+            except Exception:
+                pass
+            self._mmap_fh = None
+```
+
+При сохранении mmap закрывается, данные пишутся через обычный файловый дескриптор, затем mmap открывается заново.
+
+Но, прошу заметить, мы не пишем изменения сразу в файл. Вместо этого они накапливаются в словаре, где ключ - абсолютное смещение, а значение - новый байт. При отрисовке get_row накладывает грязные байты поверх данных из кеша:
+
+```python
+    def get_row(self, row: int) -> Optional[bytearray]:
+        if not (0 <= row < self.total_rows):
+            return None
+
+        cached = self._cache.get(row)
+        if cached is None:
+            self._load_region(row)
+            cached = self._cache.get(row)
+
+        if cached is None:
+            return None
+
+        data = bytearray(cached)
+        start_offset = row * self.width
+        for col in range(len(data)):
+            off = start_offset + col
+            if off in self._dirty:
+                data[col] = self._dirty[off]
+
+        return data
+```
+
+При сохранении dirty-смещения группируются в последовательные блоки и пишутся одним вызовом fh.write(block). Это быстрее, чем seek + write для каждого байта.
+
+```python
+def save(self) -> None:
+    if not self._dirty:
+        return
+
+    groups = _group_consecutive(list(self._dirty.items()))
+
+    self._close_mmap()
+
+    with open(self.path, "r+b") as fh:
+        for offset, block in groups:
+            fh.seek(offset)
+            fh.write(block)
+
+    self._dirty.clear()
+    self._cache.clear()
+    self._use_mmap = self.size >= _LARGE_FILE_THRESHOLD
+    self._open_mmap()
+    self.file_format = None
+    self._detect_format()
+```
+
+Ну и также затронем определение формата. При открытии файла читаются первые 1024 байта и передаются в функцию detect_format из formats.py. Результат сохраняется в self.file_format и используется при отрисовке для структурной подсветки, но если формат не определён — file_format остаётся None, и работает только градиентная подсветка.
+
+```python
+def _detect_format(self) -> None:
+    try:
+        header = self._read_raw(0, 1024)
+        self.file_format = detect_format(bytes(header))
+    except (IOError, OSError):
+        self.file_format = None
+```
+
+<details>
+<summary>Полный код hexfile.py</summary>
+
+```python
+import math
+import mmap
+import os
+from collections import OrderedDict
+from typing import Optional
+
+from .formats import FieldDef, FormatDef, detect_format, get_field_at
+
+_LARGE_FILE_THRESHOLD = 64 * 1024 * 1024
+_SEARCH_CHUNK = 4 * 1024 * 1024
+
+
+def _group_consecutive(offsets_vals: list[tuple[int, int]]) -> list[tuple[int, bytes]]:
+    if not offsets_vals:
+        return []
+
+    groups: list[tuple[int, bytes]] = []
+    sorted_pairs = sorted(offsets_vals, key=lambda p: p[0])
+
+    run_start, run_bytes = sorted_pairs[0]
+    run = bytearray([run_bytes])
+
+    for offset, val in sorted_pairs[1:]:
+        if offset == run_start + len(run):
+            run.append(val)
+        else:
+            groups.append((run_start, bytes(run)))
+            run_start = offset
+            run = bytearray([val])
+
+    groups.append((run_start, bytes(run)))
+    return groups
+
+
+class _LRURowCache:
+    def __init__(self, capacity: int) -> None:
+        self._cap = capacity
+        self._store: OrderedDict[int, bytearray] = OrderedDict()
+
+    def get(self, key: int) -> Optional[bytearray]:
+        if key not in self._store:
+            return None
+        self._store.move_to_end(key)
+        return self._store[key]
+
+    def put(self, key: int, value: bytearray) -> None:
+        if key in self._store:
+            self._store.move_to_end(key)
+        self._store[key] = value
+        if len(self._store) > self._cap:
+            self._store.popitem(last=False)
+
+    def update(self, key: int, col: int, value: int) -> None:
+        row = self._store.get(key)
+        if row is not None and col < len(row):
+            row[col] = value
+
+    def clear(self) -> None:
+        self._store.clear()
+
+    def __contains__(self, key: int) -> bool:
+        return key in self._store
+
+
+class HexFile:
+    CACHE_ROWS = 8192
+    PREFETCH_ROWS = 512
+
+    def __init__(self, path: str, width: int = 16) -> None:
+        self.path = path
+        self.width = width
+        self.size = os.path.getsize(path)
+        self._cache = _LRURowCache(self.CACHE_ROWS)
+        self._dirty: dict[int, int] = {}
+        self.file_format: Optional[FormatDef] = None
+        self._mmap: Optional[mmap.mmap] = None
+        self._mmap_fh = None
+        self._use_mmap = self.size >= _LARGE_FILE_THRESHOLD
+        self._open_mmap()
+        self._detect_format()
+
+    def _open_mmap(self) -> None:
+        if not self._use_mmap or self.size == 0:
+            return
+        try:
+            self._mmap_fh = open(self.path, "rb")  # type: ignore
+            self._mmap = mmap.mmap(self._mmap_fh.fileno(), 0, access=mmap.ACCESS_READ)  # type: ignore
+        except (OSError, ValueError):
+            self._mmap = None
+            if self._mmap_fh:
+                self._mmap_fh.close()
+                self._mmap_fh = None
+
+    def _close_mmap(self) -> None:
+        if self._mmap is not None:
+            try:
+                self._mmap.close()
+            except Exception:
+                pass
+            self._mmap = None
+        if self._mmap_fh is not None:
+            try:
+                self._mmap_fh.close()
+            except Exception:
+                pass
+            self._mmap_fh = None
+
+    def _detect_format(self) -> None:
+        try:
+            header = self._read_raw(0, 1024)
+            self.file_format = detect_format(bytes(header))
+        except (IOError, OSError):
+            self.file_format = None
+
+    def _read_raw(self, byte_start: int, length: int) -> bytearray:
+        if self._mmap is not None:
+            end = min(byte_start + length, self.size)
+            return bytearray(self._mmap[byte_start:end])
+
+        with open(self.path, "rb") as fh:
+            fh.seek(byte_start)
+            return bytearray(fh.read(length))
+
+    def _load_region(self, anchor_row: int) -> None:
+        row_start = max(0, anchor_row - self.PREFETCH_ROWS // 4)
+        byte_start = row_start * self.width
+        byte_len = min(self.PREFETCH_ROWS * self.width, self.size - byte_start)
+
+        if byte_len <= 0:
+            return
+
+        raw = self._read_raw(byte_start, byte_len)
+
+        for i in range(0, len(raw), self.width):
+            r = row_start + i // self.width
+            self._cache.put(r, bytearray(raw[i : i + self.width]))
+
+    @property
+    def total_rows(self) -> int:
+        return math.ceil(self.size / self.width)
+
+    @property
+    def is_dirty(self) -> bool:
+        return bool(self._dirty)
+
+    @property
+    def dirty_offsets(self) -> set[int]:
+        return set(self._dirty.keys())
+
+    def get_row(self, row: int) -> Optional[bytearray]:
+        if not (0 <= row < self.total_rows):
+            return None
+
+        cached = self._cache.get(row)
+        if cached is None:
+            self._load_region(row)
+            cached = self._cache.get(row)
+
+        if cached is None:
+            return None
+
+        data = bytearray(cached)
+        start_offset = row * self.width
+        for col in range(len(data)):
+            off = start_offset + col
+            if off in self._dirty:
+                data[col] = self._dirty[off]
+
+        return data
+
+    def write_byte(self, row: int, col: int, value: int) -> None:
+        offset = row * self.width + col
+        if offset >= self.size:
+            return
+
+        self._dirty[offset] = value
+        self._cache.update(row, col, value)
+
+    def read_byte(self, offset: int) -> int:
+        if offset in self._dirty:
+            return self._dirty[offset]
+
+        row = offset // self.width
+        col = offset % self.width
+        data = self.get_row(row)
+        if data is None or col >= len(data):
+            return 0
+        return data[col]
+
+    def save(self) -> None:
+        if not self._dirty:
+            return
+
+        groups = _group_consecutive(list(self._dirty.items()))
+
+        self._close_mmap()
+
+        with open(self.path, "r+b") as fh:
+            for offset, block in groups:
+                fh.seek(offset)
+                fh.write(block)
+
+        self._dirty.clear()
+        self._cache.clear()
+
+        self._use_mmap = self.size >= _LARGE_FILE_THRESHOLD
+        self._open_mmap()
+        self.file_format = None
+        self._detect_format()
+
+    def set_width(self, width: int) -> None:
+        self.width = width
+        self._cache.clear()
+
+    def find_bytes(self, query: bytes, start: int = 0) -> Optional[int]:
+        if not query:
+            return None
+
+        if self._mmap is not None:
+            idx = self._mmap.find(query, max(0, start))
+            return idx if idx != -1 else None
+
+        overlap = len(query) - 1
+        chunk_size = _SEARCH_CHUNK
+        offset = max(0, start - overlap)
+        prev_tail = b""
+
+        with open(self.path, "rb") as fh:
+            fh.seek(offset)
+            while True:
+                chunk = fh.read(chunk_size)
+                if not chunk:
+                    break
+
+                search_data = prev_tail + chunk
+                idx = search_data.find(query)
+                if idx != -1:
+                    found = offset + idx - len(prev_tail)
+                    if found >= start:
+                        return found
+
+                prev_tail = chunk[-overlap:] if overlap else b""
+                offset += len(chunk)
+
+        return None
+
+    def find_bytes_backward(self, query: bytes, start: int) -> Optional[int]:
+        if not query:
+            return None
+
+        if self._mmap is not None:
+            search_end = min(start + len(query) - 1, self.size)
+            idx = self._mmap.rfind(query, 0, search_end)
+            if idx != -1 and idx < start:
+                return idx
+            return None
+
+        with open(self.path, "rb") as fh:
+            search_end = min(start + len(query) - 1, self.size)
+            fh.seek(0)
+            data = fh.read(search_end)
+
+        idx = data.rfind(query, 0, start)
+        return idx if idx != -1 else None
+
+    def find_ascii(self, query: bytes, start: int = 0) -> Optional[int]:
+        return self.find_bytes(query, start)
+
+    def get_field_at(self, offset: int) -> Optional[FieldDef]:
+        if self.file_format is None:
+            return None
+        return get_field_at(offset, self.file_format)
+
+    @property
+    def format_name(self) -> str:
+        if self.file_format is None:
+            return "raw"
+        return self.file_format.name
+
+    def __del__(self) -> None:
+        self._close_mmap()
+```
+
+</details>
+
+## Система цветов
+Модуль colors.py инициализирует все требуемые цветовые пары для curses. Всего их шесть групп: базовые (адрес, курсор, dirty), градиентные (256 значений байта), типы полей (10 пар), статусная строка, панель интерпретации, поиск.
+
+Как мы ранее говорили, я интегрировал градиентную подсветку, для каждого из 256 возможных значений байта создаётся отдельная цветовая пара. Значение байта отображается на hue от 0° до 360° через HSV, насыщенность 0.8, яркость 0.9. Нулевой байт получает тёмно-серый (64, 64, 64), 0xFF — белый (255, 255, 255).
+
+```python
+def _byte_to_rgb(bval: int) -> tuple[int, int, int]:
+    if bval == BYTE_MIN:
+        return DEFAULT_BYTE_RGB
+    if bval == BYTE_MAX:
+        return MAX_BYTE_RGB
+
+    hue = (bval / 255.0) * 360.0
+    return _hsv_to_rgb(hue, 0.8, 0.9)
+```
+
+Функция _hsv_to_rgb — стандартный алгоритм конвертации HSV в RGB, шесть секторов цветового круга:
+
+```python
+def _hsv_to_rgb(h: float, s: float, v: float) -> tuple[int, int, int]:
+    h = h % 360.0
+    c = v * s
+    x = c * (1.0 - abs((h / 60.0) % 2.0 - 1.0))
+    m = v - c
+
+    if h < 60:        r, g, b = c, x, 0.0
+    elif h < 120:     r, g, b = x, c, 0.0
+    elif h < 180:     r, g, b = 0.0, c, x
+    elif h < 240:     r, g, b = 0.0, x, c
+    elif h < 300:     r, g, b = x, 0.0, c
+    else:             r, g, b = c, 0.0, x
+
+    return (int((r + m) * 255), int((g + m) * 255), int((b + m) * 255))
+```
+
+Инициализация проверяет, поддерживает ли терминал изменение палитры:
+
+```python
+def _init_hex_pairs() -> None:
+    rich = curses.can_change_color() and curses.COLORS > 16
+
+    for bval in range(COLOR_SLOTS):
+        slot = 16 + bval
+        pair_id = PAIR_HEX_BASE + bval
+
+        if rich and _init_color_slot(slot, *_byte_to_rgb(bval)):
+            curses.init_pair(pair_id, slot, -1)
+        else:
+            curses.init_pair(pair_id, curses.COLOR_WHITE, -1)
+```
+
+Если поддерживает — в цветовые слоты 16–271 записываются RGB-значения через init_color, и создаются пары с этими слотами. Если терминал не поддерживает изменение палитры — все 256 пар получают белый цвет. Редактор работает, просто без подсветки.
+
+Функция hex_color возвращает готовую пару:
+
+```python
+def hex_color(bval: int) -> int:
+    return curses.color_pair(PAIR_HEX_BASE + bval)
+```
+
+Единственное различие между панелями — в том, что отображается: hex-цифры или символ/точка. Цветовая схема одна и та же. Символ-заполнитель · для непечатных байтов получает цвет, соответствующий значению байта по градиенту — например, нулевой байт будет тёмно-серой точкой, байт 0xFF — белой точкой.
+
+Вообще все пары инициализируются так:
+
+```python
+def init_colors() -> None:
+    curses.start_color()
+    curses.use_default_colors()
+
+    _init_base_pairs()
+    _init_field_pairs()
+    _init_hex_pairs()
+    _init_extra_pairs()
+    _init_interpret_pairs()
+```
+
+Чтобы не захламлять статью, код модуля colors.py будет ниже под спойлером.
+
+Выбор цвета для каждого байта при рендеринге идёт по цепочке, реализованной в _byte_attr модуля ui.py. Сначала курсор, затем зеркальная подсветка курсора, затем dirty-байт, затем найденное совпадение поиском, затем поле формата и в конце сам стандартный градиент.
+
+<details>
+<summary>Полный код colors.py</summary>
+
+```python
+import curses
+
+from .constants import (
+    BYTE_MAX,
+    BYTE_MIN,
+    COLOR_SLOTS,
+    DEFAULT_BYTE_RGB,
+    FIELD_TYPE_COLORS,
+    MAX_BYTE_RGB,
+    PAIR_ADDR,
+    PAIR_CURSOR,
+    PAIR_DIRTY,
+    PAIR_FIELD_CHECKSUM,
+    PAIR_FIELD_DATA,
+    PAIR_FIELD_FLAGS,
+    PAIR_FIELD_HEADER,
+    PAIR_FIELD_MAGIC,
+    PAIR_FIELD_OFFSET,
+    PAIR_FIELD_RESERVED,
+    PAIR_FIELD_SIZE,
+    PAIR_FIELD_UNKNOWN,
+    PAIR_FIELD_VERSION,
+    PAIR_HEADER,
+    PAIR_HEADER_EDIT,
+    PAIR_HEX_BASE,
+    PAIR_HIGHLIGHT,
+    PAIR_INTERPRET_BORDER,
+    PAIR_INTERPRET_LABEL,
+    PAIR_INTERPRET_VALUE,
+    PAIR_KEYBINDS,
+    PAIR_KEYBINDS_EDIT,
+    PAIR_SEARCH_MATCH,
+    PAIR_SEP,
+    PAIR_STATUS,
+    PAIR_STATUS_FIELD,
+)
+
+
+def _hsv_to_rgb(h: float, s: float, v: float) -> tuple[int, int, int]:
+    h = h % 360.0
+    c = v * s
+    x = c * (1.0 - abs((h / 60.0) % 2.0 - 1.0))
+    m = v - c
+
+    if h < 60:
+        r, g, b = c, x, 0.0
+    elif h < 120:
+        r, g, b = x, c, 0.0
+    elif h < 180:
+        r, g, b = 0.0, c, x
+    elif h < 240:
+        r, g, b = 0.0, x, c
+    elif h < 300:
+        r, g, b = x, 0.0, c
+    else:
+        r, g, b = c, 0.0, x
+
+    return (
+        int((r + m) * 255),
+        int((g + m) * 255),
+        int((b + m) * 255),
+    )
+
+
+def _byte_to_rgb(bval: int) -> tuple[int, int, int]:
+    if bval == BYTE_MIN:
+        return DEFAULT_BYTE_RGB
+    if bval == BYTE_MAX:
+        return MAX_BYTE_RGB
+
+    hue = (bval / 255.0) * 360.0
+    return _hsv_to_rgb(hue, 0.8, 0.9)
+
+
+def _init_color_slot(slot: int, r: int, g: int, b: int) -> bool:
+    if slot >= curses.COLORS:
+        return False
+
+    try:
+        curses.init_color(slot, r * 1000 // 255, g * 1000 // 255, b * 1000 // 255)
+        return True
+    except (curses.error, ValueError):
+        return False
+
+
+def init_colors() -> None:
+    curses.start_color()
+    curses.use_default_colors()
+
+    _init_base_pairs()
+    _init_field_pairs()
+    _init_hex_pairs()
+    _init_extra_pairs()
+    _init_interpret_pairs()
+
+
+def _init_base_pairs() -> None:
+    pairs = [
+        (PAIR_ADDR, curses.COLOR_CYAN, -1),
+        (PAIR_SEP, curses.COLOR_WHITE, -1),
+        (PAIR_HEADER, curses.COLOR_BLACK, curses.COLOR_CYAN),
+        (PAIR_HEADER_EDIT, curses.COLOR_BLACK, curses.COLOR_GREEN),
+        (PAIR_KEYBINDS, curses.COLOR_BLACK, curses.COLOR_WHITE),
+        (PAIR_KEYBINDS_EDIT, curses.COLOR_BLACK, curses.COLOR_GREEN),
+        (PAIR_HIGHLIGHT, curses.COLOR_BLACK, curses.COLOR_YELLOW),
+        (PAIR_CURSOR, curses.COLOR_BLACK, curses.COLOR_GREEN),
+        (PAIR_DIRTY, curses.COLOR_BLACK, curses.COLOR_RED),
+    ]
+
+    for pair_id, fg, bg in pairs:
+        curses.init_pair(pair_id, fg, bg)
+
+
+def _init_field_pairs() -> None:
+    field_colors = [
+        (PAIR_FIELD_MAGIC, curses.COLOR_YELLOW, -1),
+        (PAIR_FIELD_SIZE, curses.COLOR_GREEN, -1),
+        (PAIR_FIELD_OFFSET, curses.COLOR_CYAN, -1),
+        (PAIR_FIELD_FLAGS, curses.COLOR_MAGENTA, -1),
+        (PAIR_FIELD_CHECKSUM, curses.COLOR_RED, -1),
+        (PAIR_FIELD_VERSION, curses.COLOR_BLUE, -1),
+        (PAIR_FIELD_DATA, curses.COLOR_WHITE, -1),
+        (PAIR_FIELD_RESERVED, -1, curses.COLOR_WHITE),
+        (PAIR_FIELD_HEADER, curses.COLOR_BLACK, curses.COLOR_YELLOW),
+        (PAIR_FIELD_UNKNOWN, curses.COLOR_WHITE, -1),
+    ]
+
+    for pair_id, fg, bg in field_colors:
+        curses.init_pair(pair_id, fg, bg)
+
+
+def _init_hex_pairs() -> None:
+    rich = curses.can_change_color() and curses.COLORS > 16
+
+    for bval in range(COLOR_SLOTS):
+        slot = 16 + bval
+        pair_id = PAIR_HEX_BASE + bval
+
+        if rich and _init_color_slot(slot, *_byte_to_rgb(bval)):
+            curses.init_pair(pair_id, slot, -1)
+        else:
+            curses.init_pair(pair_id, curses.COLOR_WHITE, -1)
+
+
+def _init_extra_pairs() -> None:
+    curses.init_pair(PAIR_STATUS, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    curses.init_pair(PAIR_STATUS_FIELD, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    curses.init_pair(PAIR_SEARCH_MATCH, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+
+
+def _init_interpret_pairs() -> None:
+    curses.init_pair(PAIR_INTERPRET_LABEL, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    curses.init_pair(PAIR_INTERPRET_VALUE, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    curses.init_pair(PAIR_INTERPRET_BORDER, curses.COLOR_BLACK, curses.COLOR_BLACK)
+
+
+def hex_color(bval: int) -> int:
+    return curses.color_pair(PAIR_HEX_BASE + bval)
+
+
+def ascii_color(bval: int) -> int:
+    return hex_color(bval)
+
+
+def field_color(field_type_name: str) -> int:
+    pair_id = FIELD_TYPE_COLORS.get(field_type_name, PAIR_FIELD_UNKNOWN)
+    return curses.color_pair(pair_id)
+```
+
+</details>
+
+## Конфигурация: constants.py
+Константы я вынес в отдельный модуль, чтобы не размазывать магические числа по остальным файлам. Здесь собрано всё, что не меняется во время работы редактора, но используется в нескольких местах одновременно.
+
+Номера цветовых пар для curses начинаются с единицы и идут блоками. Базовые пары занимают диапазон 1–9: адрес, разделители, заголовок, подсказки, подсветка, курсор, dirty. Градиентные пары — с 10 по 265, по одной на каждое значение байта. Пары полей формата — с 366 по 375, статусная строка и поиск — 376–378, панель интерпретации — 379–381.
+
+Словарь FIELD_TYPE_COLORS связывает строковое имя типа поля с номером цветовой пары.
+
+```python
+FIELD_TYPE_COLORS = {
+    "MAGIC": PAIR_FIELD_MAGIC,
+    "SIZE": PAIR_FIELD_SIZE,
+    "OFFSET": PAIR_FIELD_OFFSET,
+    "FLAGS": PAIR_FIELD_FLAGS,
+    "CHECKSUM": PAIR_FIELD_CHECKSUM,
+    "VERSION": PAIR_FIELD_VERSION,
+    "DATA": PAIR_FIELD_DATA,
+    "RESERVED": PAIR_FIELD_RESERVED,
+    "HEADER": PAIR_FIELD_HEADER,
+    "UNKNOWN": PAIR_FIELD_UNKNOWN,
+}
+```
+
+Перечисление EditorMode задаёт три состояния, в которых может находиться редактор, мы будем использовать его в следующем блоке, посвященном как раз состоянию редактора.
+
+```python
+class EditorMode(Enum):
+    READ = auto()
+    HEX = auto()
+    ASCII = auto()
+```
+
+И также идет настройка кейбинд-подсказок и цветовые константы.
+
+В принципе, не вижу смысла разбирать дотошно, весь код предельно понятен, и доступен под спойлером.
+
+<details>
+
+<summary>Полный код constants.py</summary>
+
+```python
+from enum import Enum, auto
+
+PAIR_ADDR = 1
+PAIR_SEP = 2
+PAIR_HEADER = 3
+PAIR_KEYBINDS = 4
+PAIR_HIGHLIGHT = 5
+PAIR_CURSOR = 6
+PAIR_DIRTY = 7
+PAIR_HEADER_EDIT = 8
+PAIR_KEYBINDS_EDIT = 9
+PAIR_HEX_BASE = 10
+PAIR_FIELD_MAGIC = 366
+PAIR_FIELD_SIZE = 367
+PAIR_FIELD_OFFSET = 368
+PAIR_FIELD_FLAGS = 369
+PAIR_FIELD_CHECKSUM = 370
+PAIR_FIELD_VERSION = 371
+PAIR_FIELD_DATA = 372
+PAIR_FIELD_RESERVED = 373
+PAIR_FIELD_HEADER = 374
+PAIR_FIELD_UNKNOWN = 375
+PAIR_STATUS = 376
+PAIR_STATUS_FIELD = 377
+PAIR_SEARCH_MATCH = 378
+PAIR_INTERPRET_LABEL = 379
+PAIR_INTERPRET_VALUE = 380
+PAIR_INTERPRET_BORDER = 381
+
+FIELD_TYPE_COLORS = {
+    "MAGIC": PAIR_FIELD_MAGIC,
+    "SIZE": PAIR_FIELD_SIZE,
+    "OFFSET": PAIR_FIELD_OFFSET,
+    "FLAGS": PAIR_FIELD_FLAGS,
+    "CHECKSUM": PAIR_FIELD_CHECKSUM,
+    "VERSION": PAIR_FIELD_VERSION,
+    "DATA": PAIR_FIELD_DATA,
+    "RESERVED": PAIR_FIELD_RESERVED,
+    "HEADER": PAIR_FIELD_HEADER,
+    "UNKNOWN": PAIR_FIELD_UNKNOWN,
+}
+
+WIDTH_CYCLES = [8, 16, 32]
+
+INTERPRET_PANEL_WIDTH = 28
+
+
+class EditorMode(Enum):
+    READ = auto()
+    HEX = auto()
+    ASCII = auto()
+
+
+KEYBINDS_READ = [
+    ("↑↓", "scroll"),
+    ("PgUp/Dn", "page"),
+    ("Home/End", "first/last"),
+    ("g", "goto"),
+    ("w", "width"),
+    ("h", "hex"),
+    ("a", "ascii"),
+    ("i", "interpret"),
+    ("?", "hex srch"),
+    ("q", "quit"),
+]
+
+KEYBINDS_NORMAL = [
+    ("↑↓←→", "move"),
+    ("e", "edit"),
+    ("/", "ascii srch"),
+    ("?", "hex srch"),
+    ("n/N", "next/prev"),
+    ("i", "interpret"),
+    ("^S", "save"),
+    ("u/^R", "undo/redo"),
+    ("Esc/r", "read"),
+    ("h/a", "panel"),
+]
+
+KEYBINDS_EDIT = [
+    ("↑↓←→", "move"),
+    ("Esc", "normal"),
+    ("^S", "save"),
+    ("u/^R", "undo/redo"),
+    ("Del/BS", "del"),
+]
+
+COLOR_SLOTS = 256
+ASCII_PRINTABLE_START = 32
+ASCII_PRINTABLE_END = 126
+ASCII_COLOR_COUNT = 95
+BYTE_MAX = 0xFF
+BYTE_MIN = 0x00
+DEFAULT_BYTE_RGB = (64, 64, 64)
+MAX_BYTE_RGB = (255, 255, 255)
+
+UNDO_LIMIT = 1000
+
+
+def human_size(n: int) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024  # type: ignore[assignment]
+    return f"{n:.1f} TiB"
+```
+
+</details>
+
+## Клавиши и терминал: keys.py и terminal.py
+Эти два модуля — тонкая абстракция над конкретным бекендом отрисовки. Сейчас бекенд — curses, но если я захочу переписать редактор на Textual, к примеру, мне достаточно заменить только keys.py, terminal.py и ui.py.
+
+keys.py просто реэкспортирует коды клавиш из curses и добавляет константы для тех клавиш, у которых нет именованных идентификаторов:
+
+```python
+import curses
+
+KEY_UP = curses.KEY_UP
+KEY_DOWN = curses.KEY_DOWN
+KEY_LEFT = curses.KEY_LEFT
+KEY_RIGHT = curses.KEY_RIGHT
+KEY_HOME = curses.KEY_HOME
+KEY_END = curses.KEY_END
+KEY_PPAGE = curses.KEY_PPAGE
+KEY_NPAGE = curses.KEY_NPAGE
+KEY_BACKSPACE = curses.KEY_BACKSPACE
+KEY_DC = curses.KEY_DC
+KEY_RESIZE = curses.KEY_RESIZE
+
+KEY_ESC = 27
+KEY_CTRL_R = 18
+KEY_CTRL_S = 19
+KEY_BACKSPACE_ALT1 = 127
+KEY_BACKSPACE_ALT2 = 8
+```
+
+Три варианта Backspace нужны потому, что разные терминалы отправляют разные коды: классический Ctrl+H (8), DEL (127) и curses.KEY_BACKSPACE (обычно 263). Все три обрабатываются одинаково — удаление предыдущего байта.
+
+terminal.py оборачивает четыре curses-функции, которые используются в главном цикле:
+
+```python
+import curses
+from typing import Any, Callable
+
+def setup(stdscr: Any) -> None:
+    curses.curs_set(0)
+    stdscr.keypad(True)
+
+def run_with_wrapper(fn: Callable[..., None], *args: Any) -> None:
+    curses.wrapper(fn, *args)
+
+def read_key(stdscr: Any) -> int:
+    return stdscr.getch()
+
+def clear(stdscr: Any) -> None:
+    stdscr.clear()
+
+def screen_size(stdscr: Any) -> tuple[int, int]:
+    return stdscr.getmaxyx()
+```
+
+Выделение этих двух модулей может показаться избыточным, но я специально так делал, чтобы логика не знала о curses, и использовала абстракции. Переписать можно будет легко на другую библиотеку, без мучений с тем что, к примеру, `__init__.py` импортирует curses и работает с ним, хотя он не должен. Так кстати было в первой версии проекта, затем я увидел этот импорт, и понял что curses не должен импортироваться в точку входа.
+
+## Состояние редактора: state.py
+state.py - модуль, отвечающий за состояние редактора. Он не читает файлы, не рендерит интерфейс, он является узлом, хранивший и реализующий логику. По сути это датакласс, мутирующий в ответ на действия пользователя
+
+```python
+@dataclass
+class _UndoEntry:
+    row: int
+    col: int
+    old_val: int
+    new_val: int
+
+
+@dataclass
+class SearchState:
+    query: bytes = b""
+    last_offset: int = -1
+    match_len: int = 0
+    is_hex: bool = False
+
+
+@dataclass
+class StatusMessage:
+    text: str = ""
+    is_error: bool = False
+
+
+@dataclass
+class EditorState:
+    hf: HexFile
+    top_row: int = 0
+    mode: EditorMode = EditorMode.READ
+    editing: bool = False
+    cur_row: int = 0
+    cur_col: int = 0
+    hex_nibble: int = 0
+    show_interpret: bool = False
+    search: SearchState = field(default_factory=SearchState)
+    status: StatusMessage = field(default_factory=StatusMessage)
+    _undo_stack: deque[_UndoEntry] = field(
+        default_factory=lambda: deque(maxlen=UNDO_LIMIT), init=False, repr=False
+    )
+    _redo_stack: deque[_UndoEntry] = field(
+        default_factory=lambda: deque(maxlen=UNDO_LIMIT), init=False, repr=False
+    )
+```
+
+Поле hf — экземпляр HexFile, через который идут все операции с данными. top_row — первая видимая строка дампа, от неё считается скроллинг. mode и editing определяют текущий режим: READ, HEX, ASCII, и внутри HEX/ASCII — находимся ли мы в режиме редактирования.
+
+Свойство cursor возвращает координаты курсора только если режим не READ — в READ курсора нет, пользователь просто скроллит файл:
+
+```python
+@property
+def cursor(self) -> Optional[tuple[int, int]]:
+    return (self.cur_row, self.cur_col) if self.mode != EditorMode.READ else None
+```
+
+Навигация курсора реализована в move_cursor. При выходе за левую границу строки курсор перескакивает на последний байт предыдущей строки, при выходе за правую — на первый байт следующей. Границы файла проверяются через total_rows и _max_col:
+
+```python
+def move_cursor(self, dr: int, dc: int) -> None:
+    col = self.cur_col + dc
+    row = self.cur_row + dr
+    w = self.hf.width
+
+    if col < 0:
+        col, row = w - 1, row - 1
+    elif col >= w:
+        col, row = 0, row + 1
+
+    row = max(0, min(row, self.hf.total_rows - 1))
+    col = min(col, self._max_col(row))
+    self.cur_row = row
+    self.cur_col = col
+    self.hex_nibble = 0
+```
+
+Синхронизация скролла в sync_scroll гарантирует, что курсор всегда в видимой области. Если курсор ушёл выше top_row — подтягиваем верхнюю границу вверх. Если ниже видимого окна — сдвигаем вниз.
+
+```python
+def sync_scroll(self, visible: int) -> None:
+    if self.cur_row < self.top_row:
+        self.top_row = self.cur_row
+    elif self.cur_row >= self.top_row + visible:
+        self.top_row = self.cur_row - visible + 1
+```
+
+### Undo-redo
+Это два дека с лимитом в 1000 записей. _undo_stack и _redo_stack — это deque с maxlen=UNDO_LIMIT. Каждая запись — датакласс _UndoEntry, хранящий строку, колонку, старое и новое значение байта.
+
+Метод _record_write вызывается перед каждой записью. Он читает текущее значение байта, пишет новое, сохраняет entry в undo-стек и очищает redo-стек — любое новое изменение делает невозможным повтор старых отменённых действий:
+
+```python
+def _record_write(self, row: int, col: int, new_val: int) -> None:
+    old_val = self.hf.read_byte(row * self.hf.width + col)
+    self.hf.write_byte(row, col, new_val)
+    entry = _UndoEntry(row=row, col=col, old_val=old_val, new_val=new_val)
+    self._undo_stack.append(entry)
+    self._redo_stack.clear()
+```
+
+undo выталкивает запись из undo-стека, возвращает байт к старому значению, помещает запись в redo-стек и перемещает курсор на изменённый байт. redo делает обратное. Статусная строка получает сообщение с hex-значением и смещением.
+
+### Поиск
+Поиск использует отдельный датакласс SearchState, он был указан ранее. Методы search_next и search_prev реализуют кольцевой поиск. Если дошли до конца файла — начинают с начала, и наоборот. При зацикливании в статус пишется "search wrapped to start/end". Найденное смещение сохраняется в last_offset, длина совпадения — в match_len. Эти два поля используются в ui.py для подсветки совпадений жёлтым фоном.
+
+
+```python
+def _apply_search_result(
+    self, found: Optional[int], visible: int, wrapped_msg: str
+) -> bool:
+    if found is None:
+        self.status = StatusMessage(
+            f"not found: {self.search.query!r}", is_error=True
+        )
+        return False
+    self.search.last_offset = found
+    self.search.match_len = len(self.search.query)
+    self.jump_to_offset(found, visible)
+    return True
+
+def search_next(self, visible: int) -> bool:
+    if not self.search.query:
+        return False
+    start = self.cur_row * self.hf.width + self.cur_col + 1
+    found = self.hf.find_bytes(self.search.query, start)
+    if found is None:
+        found = self.hf.find_bytes(self.search.query, 0)
+        if found is not None:
+            self.status = StatusMessage("search wrapped to start")
+    return self._apply_search_result(found, visible, "search wrapped to start")
+
+def search_prev(self, visible: int) -> bool:
+    if not self.search.query:
+        return False
+    current = self.cur_row * self.hf.width + self.cur_col
+    found = self.hf.find_bytes_backward(self.search.query, current)
+    if found is None:
+        found = self.hf.find_bytes_backward(self.search.query, self.hf.size)
+        if found is not None:
+            self.status = StatusMessage("search wrapped to end")
+    return self._apply_search_result(found, visible, "search wrapped to end")
+```
+
+<details>
+<summary>Полный код state.py</summary>
+
+```python
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Optional
+
+from .constants import (
+    ASCII_PRINTABLE_END,
+    ASCII_PRINTABLE_START,
+    UNDO_LIMIT,
+    WIDTH_CYCLES,
+    EditorMode,
+)
+from .hexfile import HexFile
+
+
+@dataclass
+class _UndoEntry:
+    row: int
+    col: int
+    old_val: int
+    new_val: int
+
+
+@dataclass
+class SearchState:
+    query: bytes = b""
+    last_offset: int = -1
+    match_len: int = 0
+    is_hex: bool = False
+
+
+@dataclass
+class StatusMessage:
+    text: str = ""
+    is_error: bool = False
+
+
+@dataclass
+class EditorState:
+    hf: HexFile
+    top_row: int = 0
+    mode: EditorMode = EditorMode.READ
+    editing: bool = False
+    cur_row: int = 0
+    cur_col: int = 0
+    hex_nibble: int = 0
+    show_interpret: bool = False
+    search: SearchState = field(default_factory=SearchState)
+    status: StatusMessage = field(default_factory=StatusMessage)
+    _undo_stack: deque[_UndoEntry] = field(
+        default_factory=lambda: deque(maxlen=UNDO_LIMIT), init=False, repr=False
+    )
+    _redo_stack: deque[_UndoEntry] = field(
+        default_factory=lambda: deque(maxlen=UNDO_LIMIT), init=False, repr=False
+    )
+
+    @property
+    def cursor(self) -> Optional[tuple[int, int]]:
+        return (self.cur_row, self.cur_col) if self.mode != EditorMode.READ else None
+
+    @property
+    def in_hex_panel(self) -> bool:
+        return self.mode == EditorMode.HEX
+
+    @property
+    def in_ascii_panel(self) -> bool:
+        return self.mode == EditorMode.ASCII
+
+    @property
+    def cursor_offset(self) -> int:
+        return self.cur_row * self.hf.width + self.cur_col
+
+    def toggle_interpret(self) -> None:
+        self.show_interpret = not self.show_interpret
+
+    def clamp_top(self, visible: int) -> None:
+        self.top_row = max(0, min(self.top_row, self.hf.total_rows - visible))
+
+    def scroll(self, delta: int, visible: int) -> None:
+        self.top_row = max(
+            0,
+            min(self.top_row + delta, self.hf.total_rows - visible),
+        )
+
+    def cycle_width(self) -> None:
+        idx = WIDTH_CYCLES.index(self.hf.width)
+        self.hf.set_width(WIDTH_CYCLES[(idx + 1) % len(WIDTH_CYCLES)])
+        self.top_row = 0
+
+    def set_mode(self, mode: EditorMode) -> None:
+        self.mode = mode
+        self.editing = False
+        self.hex_nibble = 0
+        if mode != EditorMode.READ:
+            self.cur_row = self.top_row
+            self.cur_col = 0
+
+    def enter_edit(self) -> None:
+        if self.mode != EditorMode.READ:
+            self.editing = True
+            self.hex_nibble = 0
+
+    def exit_edit(self) -> None:
+        self.editing = False
+        self.hex_nibble = 0
+
+    def _max_col(self, row: int) -> int:
+        data = self.hf.get_row(row)
+        return (len(data) - 1) if data else 0
+
+    def move_cursor(self, dr: int, dc: int) -> None:
+        col = self.cur_col + dc
+        row = self.cur_row + dr
+        w = self.hf.width
+
+        if col < 0:
+            col, row = w - 1, row - 1
+        elif col >= w:
+            col, row = 0, row + 1
+
+        row = max(0, min(row, self.hf.total_rows - 1))
+        col = min(col, self._max_col(row))
+        self.cur_row = row
+        self.cur_col = col
+        self.hex_nibble = 0
+
+    def _record_write(self, row: int, col: int, new_val: int) -> None:
+        old_val = self.hf.read_byte(row * self.hf.width + col)
+        self.hf.write_byte(row, col, new_val)
+        entry = _UndoEntry(row=row, col=col, old_val=old_val, new_val=new_val)
+        self._undo_stack.append(entry)
+        self._redo_stack.clear()
+
+    def write_hex_nibble(self, nibble: int) -> None:
+        offset = self.cur_row * self.hf.width + self.cur_col
+        current = self.hf.read_byte(offset)
+
+        if self.hex_nibble == 0:
+            new_val = (nibble << 4) | (current & 0x0F)
+            self._record_write(self.cur_row, self.cur_col, new_val)
+            self.hex_nibble = 1
+        else:
+            current_in_file = self.hf.read_byte(offset)
+            new_val = (current_in_file & 0xF0) | nibble
+            self._record_write(self.cur_row, self.cur_col, new_val)
+            self.hex_nibble = 0
+            self.move_cursor(0, 1)
+
+    def write_ascii(self, char: str) -> None:
+        if ASCII_PRINTABLE_START <= ord(char) <= ASCII_PRINTABLE_END:
+            self._record_write(self.cur_row, self.cur_col, ord(char))
+            self.move_cursor(0, 1)
+
+    def delete_forward(self) -> None:
+        self._record_write(self.cur_row, self.cur_col, 0x00)
+        self.move_cursor(0, 1)
+
+    def delete_backward(self) -> None:
+        self.move_cursor(0, -1)
+        self._record_write(self.cur_row, self.cur_col, 0x00)
+
+    def undo(self) -> None:
+        if not self._undo_stack:
+            self.status = StatusMessage("nothing to undo", is_error=True)
+            return
+        entry = self._undo_stack.pop()
+        self.hf.write_byte(entry.row, entry.col, entry.old_val)
+        self._redo_stack.append(entry)
+        self.cur_row = entry.row
+        self.cur_col = entry.col
+        self.status = StatusMessage(
+            f"undo → {entry.old_val:02x} at {entry.row * self.hf.width + entry.col:08x}"
+        )
+
+    def redo(self) -> None:
+        if not self._redo_stack:
+            self.status = StatusMessage("nothing to redo", is_error=True)
+            return
+        entry = self._redo_stack.pop()
+        self.hf.write_byte(entry.row, entry.col, entry.new_val)
+        self._undo_stack.append(entry)
+        self.cur_row = entry.row
+        self.cur_col = entry.col
+        self.status = StatusMessage(
+            f"redo → {entry.new_val:02x} at {entry.row * self.hf.width + entry.col:08x}"
+        )
+
+    def sync_scroll(self, visible: int) -> None:
+        if self.cur_row < self.top_row:
+            self.top_row = self.cur_row
+        elif self.cur_row >= self.top_row + visible:
+            self.top_row = self.cur_row - visible + 1
+
+    def jump_to_offset(self, offset: int, visible: int) -> None:
+        row = offset // self.hf.width
+        col = offset % self.hf.width
+
+        self.cur_row = max(0, min(row, self.hf.total_rows - 1))
+        self.cur_col = max(0, min(col, self._max_col(self.cur_row)))
+        self.top_row = max(
+            0,
+            min(self.cur_row - visible // 2, self.hf.total_rows - visible),
+        )
+
+    def _apply_search_result(
+        self, found: Optional[int], visible: int, wrapped_msg: str
+    ) -> bool:
+        if found is None:
+            self.status = StatusMessage(
+                f"not found: {self.search.query!r}", is_error=True
+            )
+            return False
+        self.search.last_offset = found
+        self.search.match_len = len(self.search.query)
+        self.jump_to_offset(found, visible)
+        return True
+
+    def search_next(self, visible: int) -> bool:
+        if not self.search.query:
+            return False
+        start = self.cur_row * self.hf.width + self.cur_col + 1
+        found = self.hf.find_bytes(self.search.query, start)
+        if found is None:
+            found = self.hf.find_bytes(self.search.query, 0)
+            if found is not None:
+                self.status = StatusMessage("search wrapped to start")
+        return self._apply_search_result(found, visible, "search wrapped to start")
+
+    def search_prev(self, visible: int) -> bool:
+        if not self.search.query:
+            return False
+        current = self.cur_row * self.hf.width + self.cur_col
+        found = self.hf.find_bytes_backward(self.search.query, current)
+        if found is None:
+            found = self.hf.find_bytes_backward(self.search.query, self.hf.size)
+            if found is not None:
+                self.status = StatusMessage("search wrapped to end")
+        return self._apply_search_result(found, visible, "search wrapped to end")
+```
+
+</details>
+
+## Кейбинды: handlers.py
+Модуль handlers превращает коды клавиш в вызовы методов EditorState. Логика разбита по режимам, и для каждого режима строится таблица соответствия — словарь, где ключом является код клавиши, а значением лямбда с действием.
+
+Для READ-режима строится таблица _make_read_nav_table:
+
+```python
+def _make_read_nav_table(state: EditorState, visible: int) -> dict[int, object]:
+    return {
+        KEY_DOWN: lambda: state.scroll(1, visible),
+        KEY_UP: lambda: state.scroll(-1, visible),
+        KEY_NPAGE: lambda: state.scroll(visible, visible),
+        KEY_PPAGE: lambda: state.scroll(-visible, visible),
+        KEY_HOME: lambda: setattr(state, "top_row", 0),
+        KEY_END: lambda: setattr(
+            state, "top_row", max(0, state.hf.total_rows - visible)
+        ),
+        ord("w"): state.cycle_width,
+        ord("W"): state.cycle_width,
+        ord("r"): lambda: state.set_mode(EditorMode.READ),
+        ord("h"): lambda: state.set_mode(EditorMode.HEX),
+        ord("a"): lambda: state.set_mode(EditorMode.ASCII),
+    }
+```
+
+Для нормального режима HEX/ASCII добавляется навигация курсором, вход в редактирование, undo, поиск. Для режима редактирования — специальные клавиши (Esc для выхода, Backspace/Delete для удаления, undo/redo) и навигация.
+
+Дублирование между handle_hex_edit и handle_ascii_edit устранено через общую функцию _handle_edit_common. Она принимает предикат допустимых символов и функцию-писатель, а всё остальное — навигация и специальные клавиши — обрабатывается одинаково:
+
+```python
+def _handle_edit_common(
+    state: EditorState,
+    key: int,
+    visible: int,
+    char_predicate: Callable[[int], bool],
+    char_writer: Callable[[int], None],
+) -> None:
+    special = _make_edit_special_table(state, visible)
+    nav_keys: dict[int, tuple[int, int]] = {
+        KEY_DOWN: (1, 0), KEY_UP: (-1, 0),
+        KEY_LEFT: (0, -1), KEY_RIGHT: (0, 1),
+    }
+
+    if key in special:
+        special[key]()
+    elif key in nav_keys:
+        dr, dc = nav_keys[key]
+        state.move_cursor(dr, dc)
+        state.sync_scroll(visible)
+    elif key == KEY_HOME:
+        state.cur_col = 0
+    elif key == KEY_END:
+        state.cur_col = state._max_col(state.cur_row)
+    elif char_predicate(key):
+        char_writer(key)
+        state.sync_scroll(visible)
+```
+
+Теперь handle_hex_edit и handle_ascii_edit — просто вызовы этой функции с разными предикатами:
+
+```python
+def handle_hex_edit(state, key, visible):
+    _handle_edit_common(state, key, visible,
+        char_predicate=lambda k: k in _HEX_CHARS,
+        char_writer=lambda k: state.write_hex_nibble(_HEX_CHARS[k]))
+
+def handle_ascii_edit(state, key, visible):
+    _handle_edit_common(state, key, visible,
+        char_predicate=lambda k: 32 <= k <= 126,
+        char_writer=lambda k: state.write_ascii(chr(k)))
+```
+
+Словарь _HEX_CHARS вынесен на уровень модуля — он строится один раз и маппит коды символов 0-9, a-f, A-F в числовые значения нибблов.
+
+```python
+_HEX_CHARS: dict[int, int] = {
+    **{ord(str(d)): d for d in range(10)},
+    **{ord(c): v for c, v in zip("abcdef", range(10, 16))},
+    **{ord(c): v for c, v in zip("ABCDEF", range(10, 16))},
+}
+```
+
+<details>
+
+<summary>Полный код handlers.py</summary>
+
+```python
+from typing import Callable
+
+from .constants import EditorMode
+from .keys import (
+    KEY_BACKSPACE,
+    KEY_BACKSPACE_ALT1,
+    KEY_BACKSPACE_ALT2,
+    KEY_CTRL_R,
+    KEY_DC,
+    KEY_DOWN,
+    KEY_END,
+    KEY_ESC,
+    KEY_HOME,
+    KEY_LEFT,
+    KEY_NPAGE,
+    KEY_PPAGE,
+    KEY_RIGHT,
+    KEY_UP,
+)
+from .state import EditorState
+
+_HEX_CHARS: dict[int, int] = {
+    **{ord(str(d)): d for d in range(10)},
+    **{ord(c): v for c, v in zip("abcdef", range(10, 16))},
+    **{ord(c): v for c, v in zip("ABCDEF", range(10, 16))},
+}
+
+
+def _make_read_nav_table(state: EditorState, visible: int) -> dict[int, object]:
+    return {
+        KEY_DOWN: lambda: state.scroll(1, visible),
+        KEY_UP: lambda: state.scroll(-1, visible),
+        KEY_NPAGE: lambda: state.scroll(visible, visible),
+        KEY_PPAGE: lambda: state.scroll(-visible, visible),
+        KEY_HOME: lambda: setattr(state, "top_row", 0),
+        KEY_END: lambda: setattr(
+            state, "top_row", max(0, state.hf.total_rows - visible)
+        ),
+        ord("w"): state.cycle_width,
+        ord("W"): state.cycle_width,
+        ord("r"): lambda: state.set_mode(EditorMode.READ),
+        ord("h"): lambda: state.set_mode(EditorMode.HEX),
+        ord("a"): lambda: state.set_mode(EditorMode.ASCII),
+    }
+
+
+def _make_panel_nav_table(state: EditorState, visible: int) -> dict[int, object]:
+    return {
+        KEY_DOWN: lambda: (state.move_cursor(1, 0), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        KEY_UP: lambda: (state.move_cursor(-1, 0), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        KEY_LEFT: lambda: (state.move_cursor(0, -1), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        KEY_RIGHT: lambda: (state.move_cursor(0, 1), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        KEY_HOME: lambda: setattr(state, "cur_col", 0),
+        KEY_END: lambda: setattr(state, "cur_col", state._max_col(state.cur_row)),
+        KEY_PPAGE: lambda: (
+            state.scroll(-visible, visible),  # type: ignore[func-returns-value]
+            state.sync_scroll(visible),  # type: ignore[func-returns-value]
+        ),
+        KEY_NPAGE: lambda: (state.scroll(visible, visible), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        ord("e"): state.enter_edit,
+        ord("E"): state.enter_edit,
+        ord("u"): state.undo,
+        ord("U"): state.undo,
+        ord("r"): lambda: state.set_mode(EditorMode.READ),
+        ord("h"): lambda: state.set_mode(EditorMode.HEX),
+        ord("a"): lambda: state.set_mode(EditorMode.ASCII),
+        ord("w"): state.cycle_width,
+        ord("W"): state.cycle_width,
+        KEY_ESC: lambda: state.set_mode(EditorMode.READ),
+    }
+
+
+def _make_edit_special_table(state: EditorState, visible: int) -> dict[int, object]:
+    return {
+        KEY_ESC: state.exit_edit,
+        KEY_BACKSPACE: lambda: (state.delete_backward(), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        KEY_BACKSPACE_ALT1: lambda: (
+            state.delete_backward(),  # type: ignore[func-returns-value]
+            state.sync_scroll(visible),  # type: ignore[func-returns-value]
+        ),
+        KEY_BACKSPACE_ALT2: lambda: (
+            state.delete_backward(),  # type: ignore[func-returns-value]
+            state.sync_scroll(visible),  # type: ignore[func-returns-value]
+        ),
+        KEY_DC: lambda: (state.delete_forward(), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        ord("u"): state.undo,
+        KEY_CTRL_R: state.redo,
+    }
+
+
+def _handle_edit_common(
+    state: EditorState,
+    key: int,
+    visible: int,
+    char_predicate: Callable[[int], bool],
+    char_writer: Callable[[int], None],
+) -> None:
+    special = _make_edit_special_table(state, visible)
+    nav_keys: dict[int, tuple[int, int]] = {
+        KEY_DOWN: (1, 0),
+        KEY_UP: (-1, 0),
+        KEY_LEFT: (0, -1),
+        KEY_RIGHT: (0, 1),
+    }
+
+    if key in special:
+        special[key]()  # type: ignore[operator]
+    elif key in nav_keys:
+        dr, dc = nav_keys[key]
+        state.move_cursor(dr, dc)
+        state.sync_scroll(visible)
+    elif key == KEY_HOME:
+        state.cur_col = 0
+    elif key == KEY_END:
+        state.cur_col = state._max_col(state.cur_row)
+    elif char_predicate(key):
+        char_writer(key)
+        state.sync_scroll(visible)
+
+
+def handle_read(state: EditorState, key: int, visible: int) -> bool:
+    if key in (ord("q"), ord("Q")):
+        return False
+
+    action = _make_read_nav_table(state, visible).get(key)
+    if action is not None:
+        action()  # type: ignore[operator]
+    return True
+
+
+def handle_panel_normal(state: EditorState, key: int, visible: int) -> bool:
+    if key in (ord("q"), ord("Q")):
+        return False
+
+    action = _make_panel_nav_table(state, visible).get(key)
+    if action is not None:
+        action()  # type: ignore[operator]
+    return True
+
+
+def handle_hex_edit(state: EditorState, key: int, visible: int) -> None:
+    _handle_edit_common(
+        state,
+        key,
+        visible,
+        char_predicate=lambda k: k in _HEX_CHARS,
+        char_writer=lambda k: state.write_hex_nibble(_HEX_CHARS[k]),
+    )
+
+
+def handle_ascii_edit(state: EditorState, key: int, visible: int) -> None:
+    _handle_edit_common(
+        state,
+        key,
+        visible,
+        char_predicate=lambda k: 32 <= k <= 126,
+        char_writer=lambda k: state.write_ascii(chr(k)),
+    )
+```
+
+</details>

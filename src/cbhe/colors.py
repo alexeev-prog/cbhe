@@ -1,16 +1,13 @@
 import curses
 
 from .constants import (
-    ASCII_COLOR_COUNT,
-    ASCII_PRINTABLE_END,
-    ASCII_PRINTABLE_START,
     BYTE_MAX,
     BYTE_MIN,
     COLOR_SLOTS,
     DEFAULT_BYTE_RGB,
+    FIELD_TYPE_COLORS,
     MAX_BYTE_RGB,
     PAIR_ADDR,
-    PAIR_ASCII_BASE,
     PAIR_CURSOR,
     PAIR_DIRTY,
     PAIR_FIELD_CHECKSUM,
@@ -93,7 +90,6 @@ def init_colors() -> None:
     _init_base_pairs()
     _init_field_pairs()
     _init_hex_pairs()
-    _init_ascii_pairs()
     _init_extra_pairs()
     _init_interpret_pairs()
 
@@ -146,22 +142,6 @@ def _init_hex_pairs() -> None:
             curses.init_pair(pair_id, curses.COLOR_WHITE, -1)
 
 
-def _init_ascii_pairs() -> None:
-    rich = curses.can_change_color() and curses.COLORS > 16
-
-    for i in range(ASCII_COLOR_COUNT):
-        slot = 272 + i
-        pair_id = PAIR_ASCII_BASE + i
-
-        if rich:
-            gray = 150 + int(i / 94 * 105)
-            if _init_color_slot(slot, gray, gray, gray):
-                curses.init_pair(pair_id, slot, -1)
-                continue
-
-        curses.init_pair(pair_id, curses.COLOR_WHITE, -1)
-
-
 def _init_extra_pairs() -> None:
     curses.init_pair(PAIR_STATUS, curses.COLOR_WHITE, curses.COLOR_BLACK)
     curses.init_pair(PAIR_STATUS_FIELD, curses.COLOR_YELLOW, curses.COLOR_BLACK)
@@ -179,13 +159,9 @@ def hex_color(bval: int) -> int:
 
 
 def ascii_color(bval: int) -> int:
-    if ASCII_PRINTABLE_START <= bval <= ASCII_PRINTABLE_END:
-        return curses.color_pair(PAIR_ASCII_BASE + (bval - ASCII_PRINTABLE_START))
-    return curses.color_pair(PAIR_HEX_BASE + bval)
+    return hex_color(bval)
 
 
 def field_color(field_type_name: str) -> int:
-    from .constants import FIELD_TYPE_COLORS
-
     pair_id = FIELD_TYPE_COLORS.get(field_type_name, PAIR_FIELD_UNKNOWN)
     return curses.color_pair(pair_id)
