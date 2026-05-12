@@ -120,7 +120,7 @@ def color_for_high_nibble(byte_value: int) -> str:
     if byte_value == 0xFF:
         return "\033[97m"
 
-    colors = [
+    colors = [              # Цвета (вы можете взять другие):
         "\033[91m",         # Ярко-красный
         "\033[38;5;208m",   # Оранжевый (256 цветов)
         "\033[93m",         # Ярко-жёлтый
@@ -222,3 +222,230 @@ def _byte_to_rgb(bval: int) -> tuple[int, int, int]:
 Градиенты хороши для общего обзора, но не отвечают на вопрос «что значит этот байт?». PNG-сигнатура \x89PNG и поле ширины изображения — оба получат просто цвет по значению. Чтобы редактор понимал контекст, добавлен третий слой: структурная подсветка по формату файла.
 
 ![Пример сигнатуры](https://habrastorage.org/webt/55/eb/45/55eb459e24a48fe4bf298475ff56d68d.png)
+
+При открытии файла наш редактор читает первые 1024 байта и прогоняет их через функцию детектинга формала. Тот, в свою очередь, перебирает все зарегистрированные форматы и проверяет по списку сигнатур. Если все совпадает - формат определен.
+
+В проекте четыре встроенных формата. PNG ищет `\x89PNG\r\n\x1a\n` на смещении 0. ELF — `\x7fELF`. JPEG — `\xff\xd8\xff`. ZIP — `PK\x03\x04`. Каждый описан как `FormatDef` — датакласс с именем, MIME-типом, списком сигнатур и списком полей.
+
+```python
+@dataclass
+class FormatDef:
+    name: str
+    mime: str
+    signatures: list[tuple[int, bytes]]
+    fields: list[FieldDef]
+    _index: dict[int, FieldDef] = field(default_factory=dict, init=False, repr=False)
+```
+
+И вот сам список встроенных форматов. Каюсь, для облегчения навайбкодил этот момент, так как рутинная и муторная работа:
+
+```python
+class FieldType(Enum): # Тип поля
+    MAGIC = auto()
+    SIZE = auto()
+    OFFSET = auto()
+    FLAGS = auto()
+    CHECKSUM = auto()
+    VERSION = auto()
+    DATA = auto()
+    RESERVED = auto()
+    HEADER = auto()
+    UNKNOWN = auto()
+
+
+@dataclass
+class FieldDef: # Дефиниция поля
+    offset: int
+    length: int
+    name: str
+    ftype: FieldType
+
+
+BUILTIN_FORMATS: list[FormatDef] = [
+    FormatDef(
+        name="PNG",
+        mime="image/png",
+        signatures=[(0, b"\x89PNG\r\n\x1a\n")],
+        fields=[
+            FieldDef(0, 8, "Signature", FieldType.MAGIC),
+            FieldDef(8, 4, "IHDR Length", FieldType.SIZE),
+            FieldDef(12, 4, "IHDR Chunk Type", FieldType.HEADER),
+            FieldDef(16, 4, "Width", FieldType.SIZE),
+            FieldDef(20, 4, "Height", FieldType.SIZE),
+            FieldDef(24, 1, "Bit Depth", FieldType.FLAGS),
+            FieldDef(25, 1, "Color Type", FieldType.FLAGS),
+            FieldDef(26, 1, "Compression", FieldType.FLAGS),
+            FieldDef(27, 1, "Filter", FieldType.FLAGS),
+            FieldDef(28, 1, "Interlace", FieldType.FLAGS),
+            FieldDef(29, 4, "CRC", FieldType.CHECKSUM),
+        ],
+    ),
+    FormatDef(
+        name="ELF",
+        mime="application/x-elf",
+        signatures=[(0, b"\x7fELF")],
+        fields=[
+            FieldDef(0, 4, "Magic", FieldType.MAGIC),
+            FieldDef(4, 1, "Class", FieldType.VERSION),
+            FieldDef(5, 1, "Endianness", FieldType.FLAGS),
+            FieldDef(6, 1, "Version", FieldType.VERSION),
+            FieldDef(7, 1, "OS/ABI", FieldType.FLAGS),
+            FieldDef(8, 1, "ABI Version", FieldType.VERSION),
+            FieldDef(9, 7, "Padding", FieldType.RESERVED),
+            FieldDef(16, 2, "Type", FieldType.FLAGS),
+            FieldDef(18, 2, "Machine", FieldType.FLAGS),
+            FieldDef(20, 4, "ELF Version", FieldType.VERSION),
+            FieldDef(24, 4, "Entry Point (32-bit)", FieldType.OFFSET),
+            FieldDef(28, 4, "PH Offset (32-bit)", FieldType.OFFSET),
+            FieldDef(32, 4, "SH Offset (32-bit)", FieldType.OFFSET),
+            FieldDef(36, 4, "Flags", FieldType.FLAGS),
+            FieldDef(40, 2, "Header Size", FieldType.SIZE),
+            FieldDef(42, 2, "PH Entry Size", FieldType.SIZE),
+            FieldDef(44, 2, "PH Count", FieldType.SIZE),
+            FieldDef(46, 2, "SH Entry Size", FieldType.SIZE),
+            FieldDef(48, 2, "SH Count", FieldType.SIZE),
+            FieldDef(50, 2, "SH String Index", FieldType.OFFSET),
+        ],
+    ),
+    FormatDef(
+        name="JPEG",
+        mime="image/jpeg",
+        signatures=[(0, b"\xff\xd8\xff")],
+        fields=[
+            FieldDef(0, 2, "SOI Marker", FieldType.MAGIC),
+            FieldDef(2, 1, "APP0 Marker", FieldType.MAGIC),
+            FieldDef(3, 1, "APP0 Marker", FieldType.MAGIC),
+            FieldDef(4, 2, "APP0 Length", FieldType.SIZE),
+            FieldDef(6, 5, "JFIF Identifier", FieldType.HEADER),
+            FieldDef(11, 2, "JFIF Version", FieldType.VERSION),
+            FieldDef(13, 1, "Density Units", FieldType.FLAGS),
+            FieldDef(14, 2, "X Density", FieldType.SIZE),
+            FieldDef(16, 2, "Y Density", FieldType.SIZE),
+            FieldDef(18, 1, "Thumbnail Width", FieldType.SIZE),
+            FieldDef(19, 1, "Thumbnail Height", FieldType.SIZE),
+        ],
+    ),
+    FormatDef(
+        name="ZIP",
+        mime="application/zip",
+        signatures=[(0, b"PK\x03\x04")],
+        fields=[
+            FieldDef(0, 4, "Local File Signature", FieldType.MAGIC),
+            FieldDef(4, 2, "Version Needed", FieldType.VERSION),
+            FieldDef(6, 2, "Flags", FieldType.FLAGS),
+            FieldDef(8, 2, "Compression Method", FieldType.FLAGS),
+            FieldDef(10, 2, "Last Mod Time", FieldType.DATA),
+            FieldDef(12, 2, "Last Mod Date", FieldType.DATA),
+            FieldDef(14, 4, "CRC-32", FieldType.CHECKSUM),
+            FieldDef(18, 4, "Compressed Size", FieldType.SIZE),
+            FieldDef(22, 4, "Uncompressed Size", FieldType.SIZE),
+            FieldDef(26, 2, "Filename Length", FieldType.SIZE),
+            FieldDef(28, 2, "Extra Field Length", FieldType.SIZE),
+        ],
+    ),
+]
+```
+
+Каждое поле в формате имеет тип из перечисления `FieldType` и человекопонятное имя. Тип определяет цвет в hex-панели и ASCII-колонке:
+
+| Тип поля | Цвет | Назначение |
+|---|---|---|
+| MAGIC | жёлтый | сигнатуры и магические числа |
+| SIZE | зелёный | размеры блоков, полей, файлов |
+| OFFSET | голубой | указатели, смещения |
+| CHECKSUM | красный | контрольные суммы, CRC |
+| VERSION | синий | версии формата |
+| FLAGS | пурпурный | битовые флаги, перечисления |
+| HEADER | чёрный на жёлтом фоне | заголовки секций |
+| RESERVED | белый на белом (инвертированный) | зарезервированные поля |
+| DATA | белый | область данных, полезная нагрузка |
+| UNKNOWN | белый | тип не указан или неизвестен |
+
+Цветовые пары для типов полей инициализируются в `_init_field_pairs()` стандартными цветами curses. Это отдельные пары, не пересекающиеся с градиентными слотами.
+
+```python
+def _init_field_pairs() -> None:
+    field_colors = [
+        (PAIR_FIELD_MAGIC, curses.COLOR_YELLOW, -1),
+        (PAIR_FIELD_SIZE, curses.COLOR_GREEN, -1),
+        (PAIR_FIELD_OFFSET, curses.COLOR_CYAN, -1),
+        (PAIR_FIELD_FLAGS, curses.COLOR_MAGENTA, -1),
+        (PAIR_FIELD_CHECKSUM, curses.COLOR_RED, -1),
+        (PAIR_FIELD_VERSION, curses.COLOR_BLUE, -1),
+        (PAIR_FIELD_DATA, curses.COLOR_WHITE, -1),
+        (PAIR_FIELD_RESERVED, -1, curses.COLOR_WHITE),
+        (PAIR_FIELD_HEADER, curses.COLOR_BLACK, curses.COLOR_YELLOW),
+        (PAIR_FIELD_UNKNOWN, curses.COLOR_WHITE, -1),
+    ]
+    for pair_id, fg, bg in field_colors:
+        curses.init_pair(pair_id, fg, bg)
+```
+
+Как видно по коду, я старался придерживаться открытости и расширяемости. Встроенные форматы хранятся в списке BUILTIN_FORMATS и регистрируются при запуске. Если вы хотите добавить свой формат, то сделать это просто - через новый FormatDef прямо в коде, либо через json-файл. Благодаря тому что формат полей уже задан, это было легко реализовать.
+
+Вот пример пользовательского формата:
+
+```json
+    {
+        "name": "GIF",
+        "mime": "image/gif",
+        "signatures": [
+            {"offset": 0, "hex": "47494638"}
+        ],
+        "fields": [
+            {"offset": 0, "length": 3, "name": "Signature", "type": "MAGIC"},
+            {"offset": 3, "length": 3, "name": "Version", "type": "VERSION"},
+            {"offset": 6, "length": 2, "name": "Screen Width", "type": "SIZE"},
+            {"offset": 8, "length": 2, "name": "Screen Height", "type": "SIZE"},
+            {"offset": 10, "length": 1, "name": "Flags", "type": "FLAGS"},
+            {"offset": 11, "length": 1, "name": "Background Color Index", "type": "DATA"},
+            {"offset": 12, "length": 1, "name": "Pixel Aspect Ratio", "type": "FLAGS"},
+            {"offset": 13, "length": 3, "name": "Image Descriptor", "type": "HEADER"},
+            {"offset": 16, "length": 2, "name": "Image Left Position", "type": "OFFSET"},
+            {"offset": 18, "length": 2, "name": "Image Top Position", "type": "OFFSET"},
+            {"offset": 20, "length": 2, "name": "Image Width", "type": "SIZE"},
+            {"offset": 22, "length": 2, "name": "Image Height", "type": "SIZE"},
+            {"offset": 24, "length": 1, "name": "Image Flags", "type": "FLAGS"},
+            {"offset": 25, "length": 1, "name": "LZW Minimum Code Size", "type": "FLAGS"},
+            {"offset": 26, "length": 1, "name": "Trailer", "type": "CHECKSUM"}
+        ]
+    },
+```
+
+Новые форматы добавляются в глобальный список `FORMATS`, по которому `detect_format` итерируется при открытии файла. Порядок регистрации имеет значение - победит последний зарегистрированный формат, а встроенные форматы загружаются перед кастомными, так что пользователь может переопределить встроенный, зарегистрировав свой формат с тем же именем после загрузки JSON.
+
+Вообще, сигнатуры - это крайне интересная вещь, которую надо изучить, если вы хотите пойти в реверс-инжиниринг. А hex-редактор с подсветкой формата поможет в этом.
+
+Все эти три уровня подсветки улучшают UX в самом прямом смысле. Даже мне самому легче пользоваться с подсветкой, она помогает не тонуть в массиве байтов.
+
+# Архитектура проекта
+Ну что, время перейти к самому сладкому - самому коду и созданию hex-редактора! Писать мы будем на чистом Python 3.14 и встроенной библиотекой curses. Господам из Windows придется немного пострадать - curses не входит в стандартную поставку для windows, и вам придется установить `windows-curses`. Но даже так возможны нюансы работы - в первую очередь из-за цветов. Так что работоспособность на Windows не гарантируется, можете работать через WSL.
+
+Давайте разберем структуру:
+
+```
+src/
+└── cbhe
+    ├── __init__.py      # запуск, аргументы, главный цикл
+    ├── hexfile.py       # работа с файлом: чтение, кеш, запись, поиск
+    ├── state.py         # состояние редактора: курсор, режим, undo/redo
+    ├── handlers.py      # обработка клавиш для каждого режима
+    ├── ui.py            # отрисовка: заголовок, строки дампа, панели
+    ├── colors.py        # инициализация цветов и цветовые функции
+    ├── formats.py       # описание форматов и автоопределение
+    ├── interpret.py     # интерпретация байт: числа, float, UTF-8
+    └── constants.py     # константы, перечисления, раскладки клавиш
+```
+
+Я пытался соблюдать практики KISS, DRY и SRP из SOLID.
+
+hexfile.py знает всё про файл на диске: как читать чанками, как кешировать строки, как хранить изменённые байты, как сохранять. Он ничего не знает про курсор, цвета или клавиши.
+
+state.py держит текущее состояние: на какой мы строке, в каком режиме, редактируем ли, что в истории undo. Он вызывает методы HexFile, но не трогает ни curses, ни отрисовку.
+
+ui.py получает состояние и HexFile, и рисует всё на экране. Он не обрабатывает клавиши и не меняет данные.
+
+handlers.py получает код клавиши и состояние, модифицирует состояние. Он не рисует и не читает файл.
+
+Такое разделение означает, что можно заменить curses на другой бекенд (например, Textual), переписав только ui.py и handlers.py. Или прикрутить графический интерфейс на Qt — hexfile.py и formats.py останутся без изменений.
+

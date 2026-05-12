@@ -1,11 +1,23 @@
-import curses
+from typing import Callable
 
 from .constants import EditorMode
+from .keys import (
+    KEY_BACKSPACE,
+    KEY_BACKSPACE_ALT1,
+    KEY_BACKSPACE_ALT2,
+    KEY_CTRL_R,
+    KEY_DC,
+    KEY_DOWN,
+    KEY_END,
+    KEY_ESC,
+    KEY_HOME,
+    KEY_LEFT,
+    KEY_NPAGE,
+    KEY_PPAGE,
+    KEY_RIGHT,
+    KEY_UP,
+)
 from .state import EditorState
-
-_KEY_ESC = 27
-_KEY_CTRL_R = 18
-_KEY_CTRL_S = 19
 
 _HEX_CHARS: dict[int, int] = {
     **{ord(str(d)): d for d in range(10)},
@@ -16,12 +28,12 @@ _HEX_CHARS: dict[int, int] = {
 
 def _make_read_nav_table(state: EditorState, visible: int) -> dict[int, object]:
     return {
-        curses.KEY_DOWN: lambda: state.scroll(1, visible),
-        curses.KEY_UP: lambda: state.scroll(-1, visible),
-        curses.KEY_NPAGE: lambda: state.scroll(visible, visible),
-        curses.KEY_PPAGE: lambda: state.scroll(-visible, visible),
-        curses.KEY_HOME: lambda: setattr(state, "top_row", 0),
-        curses.KEY_END: lambda: setattr(
+        KEY_DOWN: lambda: state.scroll(1, visible),
+        KEY_UP: lambda: state.scroll(-1, visible),
+        KEY_NPAGE: lambda: state.scroll(visible, visible),
+        KEY_PPAGE: lambda: state.scroll(-visible, visible),
+        KEY_HOME: lambda: setattr(state, "top_row", 0),
+        KEY_END: lambda: setattr(
             state, "top_row", max(0, state.hf.total_rows - visible)
         ),
         ord("w"): state.cycle_width,
@@ -34,22 +46,17 @@ def _make_read_nav_table(state: EditorState, visible: int) -> dict[int, object]:
 
 def _make_panel_nav_table(state: EditorState, visible: int) -> dict[int, object]:
     return {
-        curses.KEY_DOWN: lambda: (state.move_cursor(1, 0), state.sync_scroll(visible)),  # type: ignore
-        curses.KEY_UP: lambda: (state.move_cursor(-1, 0), state.sync_scroll(visible)),  # type: ignore
-        curses.KEY_LEFT: lambda: (state.move_cursor(0, -1), state.sync_scroll(visible)),  # type: ignore
-        curses.KEY_RIGHT: lambda: (state.move_cursor(0, 1), state.sync_scroll(visible)),  # type: ignore
-        curses.KEY_HOME: lambda: setattr(state, "cur_col", 0),
-        curses.KEY_END: lambda: setattr(
-            state, "cur_col", state._max_col(state.cur_row)
+        KEY_DOWN: lambda: (state.move_cursor(1, 0), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        KEY_UP: lambda: (state.move_cursor(-1, 0), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        KEY_LEFT: lambda: (state.move_cursor(0, -1), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        KEY_RIGHT: lambda: (state.move_cursor(0, 1), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        KEY_HOME: lambda: setattr(state, "cur_col", 0),
+        KEY_END: lambda: setattr(state, "cur_col", state._max_col(state.cur_row)),
+        KEY_PPAGE: lambda: (
+            state.scroll(-visible, visible),  # type: ignore[func-returns-value]
+            state.sync_scroll(visible),  # type: ignore[func-returns-value]
         ),
-        curses.KEY_PPAGE: lambda: (
-            state.scroll(-visible, visible),  # type: ignore
-            state.sync_scroll(visible),  # type: ignore
-        ),
-        curses.KEY_NPAGE: lambda: (
-            state.scroll(visible, visible),  # type: ignore
-            state.sync_scroll(visible),  # type: ignore
-        ),
+        KEY_NPAGE: lambda: (state.scroll(visible, visible), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
         ord("e"): state.enter_edit,
         ord("E"): state.enter_edit,
         ord("u"): state.undo,
@@ -59,34 +66,65 @@ def _make_panel_nav_table(state: EditorState, visible: int) -> dict[int, object]
         ord("a"): lambda: state.set_mode(EditorMode.ASCII),
         ord("w"): state.cycle_width,
         ord("W"): state.cycle_width,
-        _KEY_ESC: lambda: state.set_mode(EditorMode.READ),
+        KEY_ESC: lambda: state.set_mode(EditorMode.READ),
     }
 
 
 def _make_edit_special_table(state: EditorState, visible: int) -> dict[int, object]:
     return {
-        _KEY_ESC: state.exit_edit,
-        curses.KEY_BACKSPACE: lambda: (
-            state.delete_backward(),  # type: ignore
-            state.sync_scroll(visible),  # type: ignore
+        KEY_ESC: state.exit_edit,
+        KEY_BACKSPACE: lambda: (state.delete_backward(), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
+        KEY_BACKSPACE_ALT1: lambda: (
+            state.delete_backward(),  # type: ignore[func-returns-value]
+            state.sync_scroll(visible),  # type: ignore[func-returns-value]
         ),
-        127: lambda: (state.delete_backward(), state.sync_scroll(visible)),  # type: ignore
-        8: lambda: (state.delete_backward(), state.sync_scroll(visible)),  # type: ignore
-        curses.KEY_DC: lambda: (state.delete_forward(), state.sync_scroll(visible)),  # type: ignore
+        KEY_BACKSPACE_ALT2: lambda: (
+            state.delete_backward(),  # type: ignore[func-returns-value]
+            state.sync_scroll(visible),  # type: ignore[func-returns-value]
+        ),
+        KEY_DC: lambda: (state.delete_forward(), state.sync_scroll(visible)),  # type: ignore[func-returns-value]
         ord("u"): state.undo,
-        _KEY_CTRL_R: state.redo,
+        KEY_CTRL_R: state.redo,
     }
+
+
+def _handle_edit_common(
+    state: EditorState,
+    key: int,
+    visible: int,
+    char_predicate: Callable[[int], bool],
+    char_writer: Callable[[int], None],
+) -> None:
+    special = _make_edit_special_table(state, visible)
+    nav_keys: dict[int, tuple[int, int]] = {
+        KEY_DOWN: (1, 0),
+        KEY_UP: (-1, 0),
+        KEY_LEFT: (0, -1),
+        KEY_RIGHT: (0, 1),
+    }
+
+    if key in special:
+        special[key]()  # type: ignore[operator]
+    elif key in nav_keys:
+        dr, dc = nav_keys[key]
+        state.move_cursor(dr, dc)
+        state.sync_scroll(visible)
+    elif key == KEY_HOME:
+        state.cur_col = 0
+    elif key == KEY_END:
+        state.cur_col = state._max_col(state.cur_row)
+    elif char_predicate(key):
+        char_writer(key)
+        state.sync_scroll(visible)
 
 
 def handle_read(state: EditorState, key: int, visible: int) -> bool:
     if key in (ord("q"), ord("Q")):
         return False
 
-    table = _make_read_nav_table(state, visible)
-    action = table.get(key)
+    action = _make_read_nav_table(state, visible).get(key)
     if action is not None:
-        action()  # type: ignore
-
+        action()  # type: ignore[operator]
     return True
 
 
@@ -94,60 +132,27 @@ def handle_panel_normal(state: EditorState, key: int, visible: int) -> bool:
     if key in (ord("q"), ord("Q")):
         return False
 
-    table = _make_panel_nav_table(state, visible)
-    action = table.get(key)
+    action = _make_panel_nav_table(state, visible).get(key)
     if action is not None:
-        action()  # type: ignore
-        return True
-
+        action()  # type: ignore[operator]
     return True
 
 
 def handle_hex_edit(state: EditorState, key: int, visible: int) -> None:
-    special = _make_edit_special_table(state, visible)
-
-    nav_keys: dict[int, tuple[int, int]] = {
-        curses.KEY_DOWN: (1, 0),
-        curses.KEY_UP: (-1, 0),
-        curses.KEY_LEFT: (0, -1),
-        curses.KEY_RIGHT: (0, 1),
-    }
-
-    if key in special:
-        special[key]()  # type: ignore
-    elif key in nav_keys:
-        dr, dc = nav_keys[key]
-        state.move_cursor(dr, dc)
-        state.sync_scroll(visible)
-    elif key == curses.KEY_HOME:
-        state.cur_col = 0
-    elif key == curses.KEY_END:
-        state.cur_col = state._max_col(state.cur_row)
-    elif key in _HEX_CHARS:
-        state.write_hex_nibble(_HEX_CHARS[key])
-        state.sync_scroll(visible)
+    _handle_edit_common(
+        state,
+        key,
+        visible,
+        char_predicate=lambda k: k in _HEX_CHARS,
+        char_writer=lambda k: state.write_hex_nibble(_HEX_CHARS[k]),
+    )
 
 
 def handle_ascii_edit(state: EditorState, key: int, visible: int) -> None:
-    special = _make_edit_special_table(state, visible)
-
-    nav_keys: dict[int, tuple[int, int]] = {
-        curses.KEY_DOWN: (1, 0),
-        curses.KEY_UP: (-1, 0),
-        curses.KEY_LEFT: (0, -1),
-        curses.KEY_RIGHT: (0, 1),
-    }
-
-    if key in special:
-        special[key]()  # type: ignore
-    elif key in nav_keys:
-        dr, dc = nav_keys[key]
-        state.move_cursor(dr, dc)
-        state.sync_scroll(visible)
-    elif key == curses.KEY_HOME:
-        state.cur_col = 0
-    elif key == curses.KEY_END:
-        state.cur_col = state._max_col(state.cur_row)
-    elif 32 <= key <= 126:
-        state.write_ascii(chr(key))
-        state.sync_scroll(visible)
+    _handle_edit_common(
+        state,
+        key,
+        visible,
+        char_predicate=lambda k: 32 <= k <= 126,
+        char_writer=lambda k: state.write_ascii(chr(k)),
+    )

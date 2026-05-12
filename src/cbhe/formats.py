@@ -174,6 +174,20 @@ def load_formats_from_json(path: str) -> list[FormatDef]:
     return [_parse_json_format(entry) for entry in data]
 
 
+def load_custom_formats(paths: list[str]) -> None:
+    for path in paths:
+        if not os.path.isfile(path):
+            print(f"Format file not found: {path}")
+            continue
+
+        try:
+            formats = load_formats_from_json(path)
+            for fmt in formats:
+                register_format(fmt)
+        except Exception as e:
+            print(f"Error loading formats from {path}: {e}")
+
+
 def register_format(fmt: FormatDef) -> None:
     FORMATS.append(fmt)
 
@@ -189,9 +203,6 @@ def get_field_at(offset: int, fmt: FormatDef) -> Optional[FieldDef]:
     return fmt.get_field_at(offset)
 
 
-def _register_builtins() -> None:
+def register_builtins() -> None:
     for builtin in BUILTIN_FORMATS:
         register_format(builtin)
-
-
-_register_builtins()

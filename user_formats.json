@@ -1,0 +1,55 @@
+[
+    {
+        "name": "GIF",
+        "mime": "image/gif",
+        "signatures": [
+            {"offset": 0, "hex": "47494638"}
+        ],
+        "fields": [
+            {"offset": 0, "length": 3, "name": "Signature", "type": "MAGIC"},
+            {"offset": 3, "length": 3, "name": "Version", "type": "VERSION"},
+            {"offset": 6, "length": 2, "name": "Screen Width", "type": "SIZE"},
+            {"offset": 8, "length": 2, "name": "Screen Height", "type": "SIZE"},
+            {"offset": 10, "length": 1, "name": "Flags", "type": "FLAGS"},
+            {"offset": 11, "length": 1, "name": "Background Color Index", "type": "DATA"},
+            {"offset": 12, "length": 1, "name": "Pixel Aspect Ratio", "type": "FLAGS"},
+            {"offset": 13, "length": 3, "name": "Image Descriptor", "type": "HEADER"},
+            {"offset": 16, "length": 2, "name": "Image Left Position", "type": "OFFSET"},
+            {"offset": 18, "length": 2, "name": "Image Top Position", "type": "OFFSET"},
+            {"offset": 20, "length": 2, "name": "Image Width", "type": "SIZE"},
+            {"offset": 22, "length": 2, "name": "Image Height", "type": "SIZE"},
+            {"offset": 24, "length": 1, "name": "Image Flags", "type": "FLAGS"},
+            {"offset": 25, "length": 1, "name": "LZW Minimum Code Size", "type": "FLAGS"},
+            {"offset": 26, "length": 1, "name": "Trailer", "type": "CHECKSUM"}
+        ]
+    },
+    {
+        "name": "BMP",
+        "mime": "image/bmp",
+        "signatures": [
+            {"offset": 0, "hex": "424D"}
+        ],
+        "fields": [
+            {"offset": 0, "length": 2, "name": "Signature", "type": "MAGIC"},
+            {"offset": 2, "length": 4, "name": "File Size", "type": "SIZE"},
+            {"offset": 6, "length": 2, "name": "Reserved 1", "type": "RESERVED"},
+            {"offset": 8, "length": 2, "name": "Reserved 2", "type": "RESERVED"},
+            {"offset": 10, "length": 4, "name": "Data Offset", "type": "OFFSET"},
+            {"offset": 14, "length": 4, "name": "DIB Header Size", "type": "SIZE"},
+            {"offset": 18, "length": 4, "name": "Width", "type": "SIZE"},
+            {"offset": 22, "length": 4, "name": "Height", "type": "SIZE"},
+            {"offset": 26, "length": 2, "name": "Color Planes", "type": "FLAGS"},
+            {"offset": 28, "length": 2, "name": "Bits Per Pixel", "type": "FLAGS"},
+            {"offset": 30, "length": 4, "name": "Compression Method", "type": "FLAGS"},
+            {"offset": 34, "length": 4, "name": "Image Size", "type": "SIZE"},
+            {"offset": 38, "length": 4, "name": "Horizontal Resolution", "type": "SIZE"},
+            {"offset": 42, "length": 4, "name": "Vertical Resolution", "type": "SIZE"},
+            {"offset": 46, "length": 4, "name": "Colors in Palette", "type": "SIZE"},
+            {"offset": 50, "length": 4, "name": "Important Colors", "type": "SIZE"},
+            {"offset": 54, "length": 4, "name": "Red Mask", "type": "FLAGS"},
+            {"offset": 58, "length": 4, "name": "Green Mask", "type": "FLAGS"},
+            {"offset": 62, "length": 4, "name": "Blue Mask", "type": "FLAGS"},
+            {"offset": 66, "length": 4, "name": "Alpha Mask", "type": "FLAGS"}
+        ]
+    }
+]
