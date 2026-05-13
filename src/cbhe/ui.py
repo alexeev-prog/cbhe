@@ -63,7 +63,7 @@ def _status_offset(state: EditorState) -> int:
 def draw_header(win: Any, hf: HexFile, state: EditorState) -> None:
     _, w = win.getmaxyx()
     pct = 100 * state.top_row // max(1, hf.total_rows - 1)
-    dirty_mark = " ✎ " if hf.is_dirty else "   "
+    dirty_mark = " * " if hf.is_dirty else "   "
 
     mode_label = _MODE_LABELS.get((state.mode, state.editing), "READ")
 
@@ -390,9 +390,6 @@ def draw_interpret_panel(win: Any, state: EditorState) -> None:
     panel_w = INTERPRET_PANEL_WIDTH
     panel_x = w - panel_w - 1
 
-    if panel_x < 10:
-        return
-
     rows = _interpret_panel_rows(win, state)
     label_w = 10
     value_w = panel_w - label_w - 3
@@ -442,3 +439,13 @@ def draw_input_prompt(win: Any, prompt: str, max_len: int) -> str:
         curses.curs_set(0)
 
     return raw
+
+
+def draw_frame(stdscr: Any, state: EditorState) -> None:
+    stdscr.erase()
+    draw_header(stdscr, state.hf, state)
+    draw_rows(stdscr, state)
+    draw_interpret_panel(stdscr, state)
+    draw_status(stdscr, state)
+    draw_keybinds(stdscr, state)
+    stdscr.refresh()

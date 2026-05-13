@@ -17,3 +17,11 @@ KEY_CTRL_R = 18
 KEY_CTRL_S = 19
 KEY_BACKSPACE_ALT1 = 127
 KEY_BACKSPACE_ALT2 = 8
+
+GOTO_KEYS = {ord("g"), ord("G")}
+SEARCH_ASCII_KEY = ord("/")
+SEARCH_HEX_KEY = ord("?")
+SEARCH_NEXT_KEY = ord("n")
+SEARCH_PREV_KEY = ord("N")
+INTERPRET_KEYS = {ord("i"), ord("I")}
+QUIT_KEYS = {ord("q"), ord("Q")}
