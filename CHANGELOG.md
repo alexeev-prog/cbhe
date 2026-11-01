@@ -1,3 +1,20 @@
+# Changelog
+
+## Unreleased
+
+- Range selection, internal copy/paste, grouped fill undo and binary export.
+- Comparison file via `--compare` or `c`, difference highlighting and navigation.
+- Nested JSON field definitions and interactive structure navigator.
+- HEX byte/nibble wildcard search, dirty-aware bounded forward/backward search.
+- Atomic saving with exclusive backups, Save As, external-change checks,
+  read-only mode and unsaved-exit confirmation.
+- F1 help, cancellable input, clearer status messages and narrow-screen guard.
+- Fix undo after width changes, clean state after reverting bytes, ASCII `u`
+  input and HEX low-nibble rendering.
+- Standard-library regression tests and expanded user documentation.
+
+## Historical commits
+
 commit a6c6771a08909eb3b168412cc37f6f6de2ae6f8f
 Author: Alexeev Bronislav <alexeev.dev@mail.ru>
 Date:   Sat May 9 22:15:47 2026 +0700

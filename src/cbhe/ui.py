@@ -41,7 +41,7 @@ _MODE_LABELS: dict[tuple[EditorMode, bool], str] = {
 def _addstr(win: Any, y: int, x: int, text: str, attr: int = 0) -> int:
     h, w = win.getmaxyx()
 
-    if y >= h or x >= w:
+    if y < 0 or x < 0 or y >= h or x >= w:
         return x
 
     text = text[: w - x - 1]
@@ -71,6 +71,10 @@ def draw_header(win: Any, hf: HexFile, state: EditorState) -> None:
     hsize = human_size(hf.size)
 
     interpret_mark = " [I]" if state.show_interpret else ""
+    if hf.read_only:
+        interpret_mark += " [RO]"
+    if state.comparison:
+        interpret_mark += " [DIFF]"
     title = (
         f"  cbhe  {mode_label}{interpret_mark} {dirty_mark}│  {basename}  │  "
         f"{hsize}  │  :{hf.width}  │  {hf.format_name.upper()}  │  {pct:3d}%  "
@@ -83,6 +87,11 @@ def draw_header(win: Any, hf: HexFile, state: EditorState) -> None:
 def draw_status(win: Any, state: EditorState) -> None:
     h, w = win.getmaxyx()
     y = h - 2
+
+    if state.status.text:
+        attr = curses.color_pair(PAIR_DIRTY if state.status.is_error else PAIR_STATUS)
+        _addstr(win, y, 0, ("  " + state.status.text).ljust(w - 1), attr)
+        return
 
     hf = state.hf
     offset = _status_offset(state)
@@ -111,6 +120,15 @@ def draw_status(win: Any, state: EditorState) -> None:
         pair_id = curses.color_pair(PAIR_STATUS_FIELD)
         x = _addstr(win, y, x, f"{field_def.name}", pair_id | curses.A_BOLD)
         x = _addstr(win, y, x, f" [{field_def.ftype.name}]", pair_id)
+
+    if state.selection:
+        start, end = state.selection
+        x = _addstr(win, y, x, f"  sel:{start:x}..{end - 1:x} ({end - start} B)", bold)
+    if state.comparison:
+        other = state.comparison
+        value = other.read_range(offset, 1)
+        text = value.hex() if value else "EOF"
+        x = _addstr(win, y, x, f"  other:{text} size:{other.size}", bold)
 
     status_msg = state.status.text
     if status_msg:
@@ -179,6 +197,14 @@ def _byte_attr(
         return curses.color_pair(PAIR_HIGHLIGHT)
     if offset in dirty_offsets:
         return curses.color_pair(PAIR_DIRTY)
+    if state.selection:
+        start, end = state.selection
+        if start <= offset < end:
+            return curses.color_pair(PAIR_SEARCH_MATCH) | curses.A_UNDERLINE
+    if state.comparison:
+        other = state.comparison
+        if offset >= other.size or other.read_byte(offset) != b:
+            return curses.color_pair(PAIR_DIRTY) | curses.A_BOLD | curses.A_UNDERLINE
     if _is_search_match(offset, state):
         return curses.color_pair(PAIR_SEARCH_MATCH)
 
@@ -230,12 +256,13 @@ def _draw_hex_part(
 
                 hi = f"{b:02x}"
                 if idx == cursor_col and editing:
-                    hi_char = hi[hex_nibble]
-                    lo_char = hi[1 - hex_nibble]
-                    x = _addstr(
-                        win, y, x, hi_char, attr | curses.A_UNDERLINE | curses.A_BOLD
-                    )
-                    x = _addstr(win, y, x, lo_char, attr)
+                    for nibble, char in enumerate(hi):
+                        nibble_attr = (
+                            attr | curses.A_UNDERLINE | curses.A_BOLD
+                            if nibble == hex_nibble
+                            else attr
+                        )
+                        x = _addstr(win, y, x, char, nibble_attr)
                 else:
                     x = _addstr(win, y, x, hi, attr)
             else:
@@ -389,6 +416,8 @@ def draw_interpret_panel(win: Any, state: EditorState) -> None:
     h, w = win.getmaxyx()
     panel_w = INTERPRET_PANEL_WIDTH
     panel_x = w - panel_w - 1
+    if panel_x < 12 or h < 7:
+        return
 
     rows = _interpret_panel_rows(win, state)
     label_w = 10
@@ -421,31 +450,109 @@ def draw_interpret_panel(win: Any, state: EditorState) -> None:
 
 def draw_input_prompt(win: Any, prompt: str, max_len: int) -> str:
     h, w = win.getmaxyx()
-    pair = PAIR_KEYBINDS
-    _addstr(win, h - 1, 0, prompt.ljust(min(40, w - 1)), curses.color_pair(pair))
-
-    curses.echo()
-    curses.curs_set(1)
+    text = ""
+    attr = curses.color_pair(PAIR_KEYBINDS)
     try:
-        raw = (
-            win.getstr(h - 1, len(prompt), max_len)
-            .decode("utf-8", errors="ignore")
-            .strip()
-        )
-    except Exception:
-        raw = ""
+        curses.curs_set(1)
+        while True:
+            label = prompt[: max(0, w - 12)]
+            room = max(1, w - len(label) - 2)
+            shown = text[-room:]
+            _addstr(win, h - 1, 0, (label + shown).ljust(w - 1), attr)
+            win.move(h - 1, min(w - 2, len(label) + len(shown)))
+            win.refresh()
+            key = win.get_wch()
+            if key == "\x1b" or key == curses.KEY_RESIZE:
+                return ""
+            if key in ("\n", "\r", curses.KEY_ENTER):
+                return text.strip()
+            if key in ("\b", "\x7f", curses.KEY_BACKSPACE):
+                text = text[:-1]
+            elif isinstance(key, str) and key.isprintable() and len(text) < max_len:
+                text += key
+    except curses.error:
+        return ""
     finally:
-        curses.noecho()
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
 
-    return raw
+
+HELP_LINES = [
+    "Navigation: arrows, PgUp/PgDn, Home/End; g: hex offset; w: row width",
+    "Modes: h: HEX, a: ASCII, r/Esc: read; e: edit; Esc: stop editing",
+    "Editing: Ctrl+Z: undo, Ctrl+R: redo; Del/Backspace: zero byte",
+    "Save: Ctrl+S (atomic + .bak); S: save copy to a new file; q: quit",
+    "Search: /: UTF-8 text; ?: HEX with ??/A?/?F masks; n/N: next/previous",
+    "Range: v: start/clear; arrows: extend; y: copy; p: overwrite paste",
+    "Range: f: fill with byte; x: export to new file (no overwrite)",
+    "Compare: c: open/close second file; ]/[: next/previous differing byte",
+    "Compare: underlined bytes differ; status shows other byte and size",
+    "Structure: t: field navigator; arrows/Home/End: select; Enter: jump",
+    "i: interpretation panel; F1: help; Esc: cancel input",
+    "Copy uses an internal buffer (16 MiB max); fill/paste max 1 MiB",
+    "Save As writes a copy: the original stays open and dirty",
+    "Press any key to close help",
+]
+
+
+def draw_overlay(win: Any, state: EditorState) -> None:
+    h, w = win.getmaxyx()
+    if state.show_help:
+        title = "Help — F1"
+        lines = HELP_LINES
+        selected = -1
+        first = 0
+    elif state.show_structure:
+        fmt = state.hf.file_format
+        fields = fmt.walk_fields() if fmt else []
+        title = f"Structure: {state.hf.format_name} — Enter jump / Esc close"
+        lines = []
+        for depth, item in fields:
+            data = state.hf.read_range(item.offset, min(item.length, 16))
+            value = (
+                str(int.from_bytes(data, item.endian))
+                if 0 < item.length <= 8
+                else data.hex(" ")
+            )
+            if len(data) < item.length:
+                value += (
+                    " …"
+                    if item.offset + item.length <= state.hf.size
+                    else " [truncated]"
+                )
+            lines.append(
+                f"{'  ' * depth}{item.name}  @{item.offset:08x} +{item.length} [{item.ftype.name}] {value}"
+            )
+        if not lines:
+            lines = ["No known structure. Load JSON definitions with --formats."]
+        selected = min(state.structure_index, len(lines) - 1)
+        first = max(0, selected - max(1, h - 6) // 2)
+    else:
+        return
+    attr = curses.color_pair(PAIR_STATUS)
+    _addstr(
+        win, 1, 0, title.ljust(w - 1), curses.color_pair(PAIR_HEADER) | curses.A_BOLD
+    )
+    for y in range(2, max(2, h - 2)):
+        index = first + y - 2
+        text = lines[index] if index < len(lines) else ""
+        row_attr = curses.color_pair(PAIR_CURSOR) if index == selected else attr
+        _addstr(win, y, 0, text.ljust(w - 1), row_attr)
 
 
 def draw_frame(stdscr: Any, state: EditorState) -> None:
     stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    if h < 5 or w < 24:
+        _addstr(stdscr, 0, 0, "Resize terminal (24x5 min)")
+        stdscr.refresh()
+        return
     draw_header(stdscr, state.hf, state)
     draw_rows(stdscr, state)
     draw_interpret_panel(stdscr, state)
+    draw_overlay(stdscr, state)
     draw_status(stdscr, state)
     draw_keybinds(stdscr, state)
     stdscr.refresh()

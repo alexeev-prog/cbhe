@@ -27,6 +27,14 @@ class FieldDef:
     length: int
     name: str
     ftype: FieldType
+    children: list["FieldDef"] = field(default_factory=list)
+    endian: str = "little"
+
+    def walk(self, depth: int = 0) -> list[tuple[int, "FieldDef"]]:
+        result = [(depth, self)]
+        for child in self.children:
+            result.extend(child.walk(depth + 1))
+        return result
 
 
 @dataclass
@@ -41,10 +49,11 @@ class FormatDef:
         self._build_index()
 
     def _build_index(self) -> None:
+        # Keep ranges rather than allocating one dictionary entry per byte.
         self._index = {}
-        for fdef in self.fields:
-            for off in range(fdef.offset, fdef.offset + fdef.length):
-                self._index[off] = fdef
+
+    def walk_fields(self) -> list[tuple[int, FieldDef]]:
+        return [entry for item in self.fields for entry in item.walk()]
 
     def match(self, data: bytes) -> bool:
         for offset, sig in self.signatures:
@@ -55,7 +64,11 @@ class FormatDef:
         return True
 
     def get_field_at(self, offset: int) -> Optional[FieldDef]:
-        return self._index.get(offset)
+        result = None
+        for _, item in self.walk_fields():
+            if item.offset <= offset < item.offset + item.length:
+                result = item
+        return result
 
 
 FORMATS: list[FormatDef] = []
@@ -149,15 +162,38 @@ def _parse_json_format(raw: dict) -> FormatDef:
     signatures = [
         (sig["offset"], bytes.fromhex(sig["hex"])) for sig in raw.get("signatures", [])
     ]
-    fields = [
-        FieldDef(
-            offset=f["offset"],
-            length=f["length"],
-            name=f["name"],
-            ftype=_FIELD_TYPE_MAP.get(f.get("type", "UNKNOWN"), FieldType.UNKNOWN),
+
+    def parse_field(item: dict, base: int = 0, depth: int = 0) -> FieldDef:
+        if depth > 32:
+            raise ValueError("structure nesting exceeds 32 levels")
+        offset = item["offset"]
+        length = item["length"]
+        if (
+            not isinstance(offset, int)
+            or not isinstance(length, int)
+            or offset < 0
+            or length < 0
+        ):
+            raise ValueError("field offset and length must be non-negative integers")
+        endian = item.get("endian", "little")
+        if endian not in ("little", "big"):
+            raise ValueError("endian must be little or big")
+        absolute = base + offset
+        children = [
+            parse_field(child, absolute, depth + 1) for child in item.get("fields", [])
+        ]
+        if any(child.offset + child.length > absolute + length for child in children):
+            raise ValueError("child field extends beyond its parent")
+        return FieldDef(
+            absolute,
+            length,
+            item["name"],
+            _FIELD_TYPE_MAP.get(item.get("type", "UNKNOWN"), FieldType.UNKNOWN),
+            children,
+            endian,
         )
-        for f in raw.get("fields", [])
-    ]
+
+    fields = [parse_field(item) for item in raw.get("fields", [])]
     return FormatDef(
         name=raw["name"],
         mime=raw.get("mime", "application/octet-stream"),
@@ -205,4 +241,5 @@ def get_field_at(offset: int, fmt: FormatDef) -> Optional[FieldDef]:
 
 def register_builtins() -> None:
     for builtin in BUILTIN_FORMATS:
-        register_format(builtin)
+        if builtin not in FORMATS:
+            register_format(builtin)

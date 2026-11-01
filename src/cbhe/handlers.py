@@ -1,3 +1,5 @@
+import curses
+import os
 from typing import Any, Callable
 
 from .constants import EditorMode
@@ -27,6 +29,8 @@ from .keys import (
     SEARCH_PREV_KEY,
 )
 from .state import EditorState
+from .hexfile import HexFile
+from .search import SearchPattern
 from .ui import draw_input_prompt
 
 _HEX_CHARS: dict[int, int] = {
@@ -112,8 +116,8 @@ def _make_edit_special_table(state: EditorState, visible: int) -> dict[int, obje
             state.sync_scroll(visible),  # type: ignore
         ),
         KEY_DC: lambda: (state.delete_forward(), state.sync_scroll(visible)),  # type: ignore
-        ord("u"): state.undo,
         KEY_CTRL_R: state.redo,
+        26: state.undo,
     }
 
 
@@ -207,6 +211,7 @@ def handle_search_ascii(state: EditorState, stdscr: Any, visible: int) -> None:
     state.search.query = query_bytes
     state.search.match_len = len(query_bytes)
     state.search.is_hex = False
+    state.search.pattern = SearchPattern.exact(query_bytes)
     offset = state.hf.find_ascii(query_bytes)
     if offset is not None:
         state.search.last_offset = offset
@@ -220,18 +225,21 @@ def handle_search_ascii(state: EditorState, stdscr: Any, visible: int) -> None:
 
 
 def handle_search_hex(state: EditorState, stdscr: Any, visible: int) -> None:
-    raw = draw_input_prompt(stdscr, " ? hex search (e.g. ff d8 ff): ", 80)
+    raw = draw_input_prompt(stdscr, " ? hex/mask (48 8b ?? a?): ", 256)
     if not raw:
         return
-    query_bytes, err = _parse_hex_query(raw)
-    if query_bytes is None:
-        state.status.text = err
+    try:
+        pattern = SearchPattern.from_hex(raw)
+    except ValueError as error:
+        state.status.text = str(error)
         state.status.is_error = True
         return
+    query_bytes = pattern.values
+    state.search.pattern = pattern
     state.search.query = query_bytes
     state.search.match_len = len(query_bytes)
     state.search.is_hex = True
-    offset = state.hf.find_bytes(query_bytes)
+    offset = state.hf.find_pattern(pattern)
     if offset is not None:
         state.search.last_offset = offset
         state.jump_to_offset(offset, visible)
@@ -245,24 +253,146 @@ def handle_search_hex(state: EditorState, stdscr: Any, visible: int) -> None:
         state.status.is_error = True
 
 
-def dispatch_key(state: EditorState, stdscr: Any, key: int, visible: int) -> bool:
+def _save(state: EditorState, stdscr: Any) -> None:
+    backup = os.path.realpath(state.hf.path) + ".bak"
+    if state.hf.is_dirty and os.path.lexists(backup):
+        answer = draw_input_prompt(
+            stdscr, " backup exists; save without new backup? [yes/no]: ", 3
+        )
+        if answer.lower() != "yes":
+            return
+        state.hf.save(backup=False)
+    else:
+        state.hf.save()
+    state.status.text = "saved"
+    state.status.is_error = False
+
+
+def _request_quit(state: EditorState, stdscr: Any) -> bool:
+    if not state.hf.is_dirty:
+        return False
+    answer = draw_input_prompt(
+        stdscr, " unsaved: [s]ave / [d]iscard / Enter cancel: ", 1
+    ).lower()
+    if answer == "d":
+        return False
+    if answer == "s":
+        _save(state, stdscr)
+        return state.hf.is_dirty
+    return True
+
+
+def _handle_structure(state: EditorState, key: int, visible: int) -> bool:
+    if key in (KEY_ESC, ord("t")):
+        state.show_structure = False
+        return True
+    fmt = state.hf.file_format
+    fields = fmt.walk_fields() if fmt else []
+    if not fields:
+        return True
+    if key in (KEY_UP, KEY_DOWN, KEY_HOME, KEY_END):
+        if key == KEY_HOME:
+            state.structure_index = 0
+        elif key == KEY_END:
+            state.structure_index = len(fields) - 1
+        else:
+            state.structure_index += 1 if key == KEY_DOWN else -1
+        state.structure_index = max(0, min(state.structure_index, len(fields) - 1))
+    elif key in (10, 13):
+        item = fields[min(state.structure_index, len(fields) - 1)][1]
+        if state.mode == EditorMode.READ:
+            state.set_mode(EditorMode.HEX)
+        state.jump_to_offset(item.offset, visible)
+        state.show_structure = False
+    return True
+
+
+def _dispatch_key(state: EditorState, stdscr: Any, key: int, visible: int) -> bool:
     if key == KEY_RESIZE:
         return True
 
+    if not state.editing:
+        state.status.text = ""
+
     if key == KEY_CTRL_S:
-        state.hf.save()
-        state.status.text = "saved"
-        state.status.is_error = False
+        _save(state, stdscr)
         return True
 
     if not state.editing and key in QUIT_KEYS:
-        return False
+        return _request_quit(state, stdscr)
+
+    if state.show_help:
+        state.show_help = False
+        return True
+
+    if state.show_structure:
+        return _handle_structure(state, key, visible)
 
     if state.editing:
         if state.mode == EditorMode.HEX:
             handle_hex_edit(state, key, visible)
         elif state.mode == EditorMode.ASCII:
             handle_ascii_edit(state, key, visible)
+        return True
+
+    if key == curses.KEY_F1:
+        state.show_help = True
+        return True
+    if key == ord("t"):
+        state.show_structure = True
+        return True
+    if key == ord("v"):
+        state.toggle_selection()
+        return True
+    if key == ord("y"):
+        state.copy_selection()
+        return True
+    if key == ord("p"):
+        state.replace_range(state.clipboard)
+        return True
+    if key == ord("f"):
+        raw = draw_input_prompt(stdscr, " fill selection with byte (hex): ", 2)
+        if raw:
+            value = int(raw, 16)
+            state.replace_range(bytes([value]), fill=True)
+        return True
+    if key == ord("x"):
+        path = draw_input_prompt(stdscr, " export selection to new file: ", 1024)
+        if path:
+            state.export_selection(path)
+        return True
+    if key == ord("S"):
+        path = draw_input_prompt(stdscr, " save copy as (new file): ", 1024)
+        if path:
+            state.hf.save_as(path)
+            state.status.text = "copy saved; original remains open"
+            state.status.is_error = False
+        return True
+    if key == ord("c"):
+        path = draw_input_prompt(
+            stdscr, " compare file (empty: close comparison): ", 1024
+        )
+        other = HexFile(path, read_only=True) if path else None
+        if state.comparison:
+            state.comparison.close()
+        state.comparison = other
+        state.status.text = (
+            "comparison opened; ]/[ next/previous difference"
+            if other
+            else "comparison closed"
+        )
+        state.status.is_error = False
+        return True
+    if key in (ord("["), ord("]")):
+        state.difference(visible, backward=key == ord("["))
+        return True
+    if key == KEY_CTRL_R:
+        state.redo()
+        state.sync_scroll(visible)
+        return True
+    if key == 26:
+        state.undo()
+        state.sync_scroll(visible)
         return True
 
     if key in INTERPRET_KEYS:
@@ -293,3 +423,12 @@ def dispatch_key(state: EditorState, stdscr: Any, key: int, visible: int) -> boo
         return handle_read(state, key, visible)
 
     return handle_panel_normal(state, key, visible)
+
+
+def dispatch_key(state: EditorState, stdscr: Any, key: int, visible: int) -> bool:
+    try:
+        return _dispatch_key(state, stdscr, key, visible)
+    except (OSError, ValueError) as error:
+        state.status.text = str(error)
+        state.status.is_error = True
+        return True

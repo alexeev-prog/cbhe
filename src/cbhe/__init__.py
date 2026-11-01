@@ -37,6 +37,10 @@ Examples:
     )
 
     parser.add_argument("file", help="File to open and edit")
+    parser.add_argument("--compare", help="Second file for byte-by-byte comparison")
+    parser.add_argument(
+        "--read-only", action="store_true", help="Disable changes to the source file"
+    )
     parser.add_argument(
         "-f",
         "--formats",
@@ -101,26 +105,34 @@ def run(stdscr: Any, args: argparse.Namespace) -> None:
     init_colors()
     setup(stdscr)
 
-    hf = HexFile(args.file, width=args.width)
+    hf = HexFile(args.file, width=args.width, read_only=args.read_only)
 
     if args.no_auto_detect:
+        hf.auto_detect = False
         hf.file_format = None
 
     state = EditorState(hf=hf)
     state.set_mode(_MODE_MAP[args.mode])
 
-    while True:
-        visible = _visible_rows(stdscr)
-        state.clamp_top(visible)
-        draw_frame(stdscr, state)
+    try:
+        if args.compare:
+            state.comparison = HexFile(args.compare, read_only=True)
+        while True:
+            visible = _visible_rows(stdscr)
+            state.clamp_top(visible)
+            draw_frame(stdscr, state)
 
-        key = stdscr.getch()
+            key = stdscr.getch()
 
-        if not dispatch_key(state, stdscr, key, visible):
-            break
+            if not dispatch_key(state, stdscr, key, visible):
+                break
 
-        if key == KEY_RESIZE:
-            clear(stdscr)
+            if key == KEY_RESIZE:
+                clear(stdscr)
+    finally:
+        hf.close()
+        if state.comparison:
+            state.comparison.close()
 
 
 def main() -> None:
@@ -131,7 +143,11 @@ def main() -> None:
         sys.exit(1)
 
     load_all_formats(args)
-    run_with_wrapper(run, args)
+    try:
+        run_with_wrapper(run, args)
+    except OSError as error:
+        print(f"cbhe: {error}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

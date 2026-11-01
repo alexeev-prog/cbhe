@@ -1,7 +1,7 @@
 [project]
 name = "cbhe"
 version = "0.1.0"
-description = "Add your description here"
+description = "Zero-dependency terminal hex editor with masked search and binary comparison"
 readme = "README.md"
 authors = [{ name = "Alexeev Bronislav", email = "alexeev.dev@mail.ru" }]
 requires-python = ">=3.13"

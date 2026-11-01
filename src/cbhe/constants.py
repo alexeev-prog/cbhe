@@ -52,6 +52,9 @@ class EditorMode(Enum):
 
 
 KEYBINDS_READ = [
+    ("F1", "help"),
+    ("t", "structure"),
+    ("c", "compare"),
     ("↑↓", "scroll"),
     ("PgUp/Dn", "page"),
     ("Home/End", "first/last"),
@@ -65,7 +68,11 @@ KEYBINDS_READ = [
 ]
 
 KEYBINDS_NORMAL = [
+    ("F1", "help"),
     ("↑↓←→", "move"),
+    ("v", "select"),
+    ("y/p", "copy/paste"),
+    ("[/]", "diff"),
     ("e", "edit"),
     ("/", "ascii srch"),
     ("?", "hex srch"),
@@ -81,7 +88,7 @@ KEYBINDS_EDIT = [
     ("↑↓←→", "move"),
     ("Esc", "normal"),
     ("^S", "save"),
-    ("u/^R", "undo/redo"),
+    ("^Z/^R", "undo/redo"),
     ("Del/BS", "del"),
 ]
 

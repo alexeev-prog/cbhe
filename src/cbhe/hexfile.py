@@ -1,10 +1,13 @@
 import math
 import mmap
 import os
+import shutil
+import tempfile
 from collections import OrderedDict
 from typing import Optional
 
 from .formats import FieldDef, FormatDef, detect_format, get_field_at
+from .search import SearchPattern
 
 _LARGE_FILE_THRESHOLD = 64 * 1024 * 1024
 _SEARCH_CHUNK = 4 * 1024 * 1024
@@ -66,8 +69,14 @@ class HexFile:
     CACHE_ROWS = 8192
     PREFETCH_ROWS = 512
 
-    def __init__(self, path: str, width: int = 16) -> None:
+    def __init__(self, path: str, width: int = 16, read_only: bool = False) -> None:
+        if width not in (8, 16, 32):
+            raise ValueError("width must be 8, 16 or 32")
         self.path = path
+        self.read_only = read_only
+        self.auto_detect = True
+        self._target = os.path.realpath(path)
+        self._snapshot = self._file_identity()
         self.width = width
         self.size = os.path.getsize(path)
         self._cache = _LRURowCache(self.CACHE_ROWS)
@@ -78,6 +87,32 @@ class HexFile:
         self._use_mmap = self.size >= _LARGE_FILE_THRESHOLD
         self._open_mmap()
         self._detect_format()
+
+    def _file_identity(self) -> tuple[int, int, int, int, int]:
+        stat = os.stat(self._target)
+        return (
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+        )
+
+    def _check_unchanged(self) -> None:
+        if (
+            os.path.realpath(self.path) != self._target
+            or self._file_identity() != self._snapshot
+        ):
+            raise OSError("file changed on disk; reopen it or use Save As")
+
+    def read_range(self, offset: int, length: int) -> bytes:
+        if offset < 0 or length < 0:
+            raise ValueError("negative offset or length")
+        data = self._read_raw(offset, min(length, max(0, self.size - offset)))
+        for pos, value in self._dirty.items():
+            if offset <= pos < offset + len(data):
+                data[pos - offset] = value
+        return bytes(data)
 
     def _open_mmap(self) -> None:
         if not self._use_mmap or self.size == 0:
@@ -106,6 +141,9 @@ class HexFile:
             self._mmap_fh = None
 
     def _detect_format(self) -> None:
+        if not self.auto_detect:
+            self.file_format = None
+            return
         try:
             header = self._read_raw(0, 1024)
             self.file_format = detect_format(bytes(header))
@@ -169,12 +207,18 @@ class HexFile:
         return data
 
     def write_byte(self, row: int, col: int, value: int) -> None:
+        if self.read_only:
+            raise PermissionError("file is read-only")
         offset = row * self.width + col
-        if offset >= self.size:
+        if not (0 <= offset < self.size):
             return
-
-        self._dirty[offset] = value
-        self._cache.update(row, col, value)
+        if not 0 <= value <= 255:
+            raise ValueError("byte must be in range 0..255")
+        original = self._read_raw(offset, 1)[0]
+        if value == original:
+            self._dirty.pop(offset, None)
+        else:
+            self._dirty[offset] = value
 
     def read_byte(self, offset: int) -> int:
         if offset in self._dirty:
@@ -187,81 +231,136 @@ class HexFile:
             return 0
         return data[col]
 
-    def save(self) -> None:
+    def save(self, backup: bool = True) -> None:
+        if self.read_only:
+            raise PermissionError("file is read-only; use Save As")
         if not self._dirty:
             return
-
-        groups = _group_consecutive(list(self._dirty.items()))
-
-        self._close_mmap()
-
-        with open(self.path, "r+b") as fh:
-            for offset, block in groups:
-                fh.seek(offset)
-                fh.write(block)
-
+        self._check_unchanged()
+        self.save_as(self._target, overwrite=True, backup=backup)
         self._dirty.clear()
         self._cache.clear()
-
+        self._snapshot = self._file_identity()
         self._use_mmap = self.size >= _LARGE_FILE_THRESHOLD
+        self._close_mmap()
         self._open_mmap()
         self.file_format = None
         self._detect_format()
 
+    def save_as(self, path: str, overwrite: bool = False, backup: bool = False) -> None:
+        target = os.path.abspath(os.path.expanduser(path))
+        same = os.path.realpath(target) == self._target
+        if same:
+            if self.read_only:
+                raise PermissionError("cannot overwrite a read-only source")
+            self._check_unchanged()
+        if os.path.lexists(target) and not overwrite:
+            raise FileExistsError(f"file already exists: {target}")
+        fd, temp = tempfile.mkstemp(prefix=".cbhe-", dir=os.path.dirname(target))
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                for offset in range(0, self.size, _SEARCH_CHUNK):
+                    fh.write(
+                        self.read_range(offset, min(_SEARCH_CHUNK, self.size - offset))
+                    )
+                fh.flush()
+                os.fsync(fh.fileno())
+            shutil.copymode(self._target, temp)
+            if same:
+                self._check_unchanged()
+            if backup and os.path.exists(target):
+                # Never follow a pre-existing backup symlink or overwrite a backup.
+                with open(target, "rb") as source, open(target + ".bak", "xb") as dest:
+                    shutil.copyfileobj(source, dest)
+                    dest.flush()
+                    os.fsync(dest.fileno())
+            if overwrite:
+                os.replace(temp, target)
+            else:
+                os.link(temp, target)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+
     def set_width(self, width: int) -> None:
+        if width not in (8, 16, 32):
+            raise ValueError("width must be 8, 16 or 32")
         self.width = width
         self._cache.clear()
 
     def find_bytes(self, query: bytes, start: int = 0) -> Optional[int]:
         if not query:
             return None
-
-        if self._mmap is not None:
-            idx = self._mmap.find(query, max(0, start))
-            return idx if idx != -1 else None
-
-        overlap = len(query) - 1
-        chunk_size = _SEARCH_CHUNK
-        offset = max(0, start - overlap)
-        prev_tail = b""
-
-        with open(self.path, "rb") as fh:
-            fh.seek(offset)
-            while True:
-                chunk = fh.read(chunk_size)
-                if not chunk:
-                    break
-
-                search_data = prev_tail + chunk
-                idx = search_data.find(query)
-                if idx != -1:
-                    found = offset + idx - len(prev_tail)
-                    if found >= start:
-                        return found
-
-                prev_tail = chunk[-overlap:] if overlap else b""
-                offset += len(chunk)
-
-        return None
+        return self.find_pattern(SearchPattern.exact(query), start)
 
     def find_bytes_backward(self, query: bytes, start: int) -> Optional[int]:
         if not query:
             return None
+        return self.find_pattern(SearchPattern.exact(query), start, backward=True)
 
-        if self._mmap is not None:
-            search_end = min(start + len(query) - 1, self.size)
-            idx = self._mmap.rfind(query, 0, search_end)
-            if idx != -1 and idx < start:
-                return idx
-            return None
+    def find_pattern(
+        self, pattern: SearchPattern, start: int = 0, backward: bool = False
+    ) -> Optional[int]:
+        length = len(pattern.values)
+        limit = max(0, self.size - length + 1)
+        exact = all(mask == 255 for mask in pattern.masks)
+        regex = None if exact else pattern.compile()
+        stop = min(max(0, start), limit) if backward else limit
+        offset = 0 if backward else max(0, start)
+        while (stop > 0) if backward else (offset < limit):
+            if backward:
+                offset = max(0, stop - _SEARCH_CHUNK)
+            end = stop if backward else min(limit, offset + _SEARCH_CHUNK)
+            data = self.read_range(offset, end - offset + length - 1)
+            if exact:
+                idx = (
+                    data.rfind(pattern.values)
+                    if backward
+                    else data.find(pattern.values)
+                )
+            else:
+                assert regex is not None
+                if backward:
+                    idx = -1
+                    for match in regex.finditer(data):
+                        idx = match.start()
+                else:
+                    match = regex.search(data)
+                    idx = match.start() if match else -1
+            if idx >= 0:
+                return offset + idx
+            if backward:
+                stop = offset
+            else:
+                offset = end
+        return None
 
-        with open(self.path, "rb") as fh:
-            search_end = min(start + len(query) - 1, self.size)
-            fh.seek(0)
-            data = fh.read(search_end)
-
-        idx = data.rfind(query, 0, start)
-        return idx if idx != -1 else None
+    def find_difference(
+        self, other: "HexFile", start: int = 0, backward: bool = False
+    ) -> Optional[int]:
+        size = max(self.size, other.size)
+        stop = min(max(0, start), size) if backward else size
+        offset = 0 if backward else max(0, start)
+        while (stop > 0) if backward else (offset < size):
+            if backward:
+                offset = max(0, stop - _SEARCH_CHUNK)
+            end = stop if backward else min(size, offset + _SEARCH_CHUNK)
+            left = self.read_range(offset, end - offset)
+            right = other.read_range(offset, end - offset)
+            if left != right:
+                indices = (
+                    range(end - offset - 1, -1, -1) if backward else range(end - offset)
+                )
+                for i in indices:
+                    if (left[i] if i < len(left) else None) != (
+                        right[i] if i < len(right) else None
+                    ):
+                        return offset + i
+            if backward:
+                stop = offset
+            else:
+                offset = end
+        return None
 
     def find_ascii(self, query: bytes, start: int = 0) -> Optional[int]:
         return self.find_bytes(query, start)
@@ -278,4 +377,8 @@ class HexFile:
         return self.file_format.name
 
     def __del__(self) -> None:
-        self._close_mmap()
+        self.close()
+
+    def close(self) -> None:
+        if hasattr(self, "_mmap"):
+            self._close_mmap()
